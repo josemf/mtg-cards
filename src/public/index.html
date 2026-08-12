@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MTG Cards</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <header class="header">
+    <div class="header-content">
+      <h1 class="logo">⚔️ MTG Cards</h1>
+      <div class="search-container">
+        <input
+          type="text"
+          id="search-input"
+          class="search-input"
+          placeholder="Search cards by name, type, set, or keyword..."
+          autocomplete="off"
+        >
+        <button id="search-button" class="search-button">Search</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="main-content">
+    <div id="loading" class="loading hidden">
+      <div class="spinner"></div>
+      <p>Searching for cards...</p>
+    </div>
+
+    <div id="error-message" class="error-message hidden"></div>
+
+    <div id="results-info" class="results-info hidden">
+      <span id="total-cards"></span>
+      <span id="current-page-info"></span>
+    </div>
+
+    <div id="cards-grid" class="cards-grid"></div>
+
+    <div id="pagination" class="pagination hidden">
+      <button id="prev-page" class="pagination-button" disabled>← Previous</button>
+      <span id="page-indicator" class="page-indicator"></span>
+      <button id="next-page" class="pagination-button">Next →</button>
+    </div>
+  </main>
+
+  <!-- Card Detail Modal -->
+  <div id="card-modal" class="modal hidden">
+    <div class="modal-overlay" id="modal-overlay"></div>
+    <div class="modal-content">
+      <button class="modal-close" id="modal-close">&times;</button>
+      <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
