@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MTG Cards</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <header class="header">
+    <div class="header-content">
+      <h1 class="logo">⚔️ MTG Cards</h1>
+      <div class="search-container">
+        <input
+          type="text"
+          id="search-input"
+          class="search-input"
+          placeholder="Search cards by name, type, set, or keyword..."
+          autocomplete="off"
+        >
+        <button id="search-button" class="search-button">Search</button>
+      </div>
+      <button id="filter-toggle" class="filter-toggle" title="Toggle filters">⚙️ Filters</button>
+      <button id="collection-toggle" class="filter-toggle" title="My Collection">📦 Collection</button>
+    </div>
+  </header>
+
+  <!-- Collection Panel -->
+  <div id="collection-panel" class="filter-panel hidden">
+    <div class="filter-row">
+      <div class="filter-group" style="flex:1;">
+        <label class="filter-label">Moxfield Username (optional)</label>
+        <div style="display:flex;gap:0.5rem;">
+          <input type="text" id="moxfield-username" class="filter-input" placeholder="Enter Moxfield username..." style="flex:1;min-width:200px;">
+          <button id="moxfield-fetch-btn" class="search-button">Load</button>
+        </div>
+        <span style="font-size:0.75rem;color:var(--color-text-muted);">Your collection must be <strong>public</strong> on Moxfield. Or paste cards below.</span>
+      </div>
+    </div>
+    <div class="filter-row">
+      <div class="filter-group" style="flex:1;">
+        <label class="filter-label">Import Collection</label>
+        <textarea id="collection-import" class="filter-input" style="width:100%;min-height:100px;resize:vertical;font-family:monospace;font-size:0.8rem;" placeholder="Paste your cards here, one per line. Formats:&#10;4 Llanowar Elves&#10;3x Counterspell (FND)&#10;2 Llanowar Elves (Foundations) #123&#10;1 Card Name (SET)"></textarea>
+        <div style="display:flex;gap:0.5rem;margin-top:0.5rem;align-items:center;flex-wrap:wrap;">
+          <button id="collection-import-btn" class="search-button">Import</button>
+          <button id="collection-clear-btn" class="clear-button">Clear Collection</button>
+          <span id="collection-status" style="font-size:0.8rem;color:var(--color-text-muted);"></span>
+        </div>
+      </div>
+    </div>
+    <div class="filter-row" id="collection-stats-row" style="display:none;">
+      <div class="filter-group">
+        <span id="collection-stats" style="font-size:0.85rem;color:var(--color-success);"></span>
+      </div>
+    </div>
+  </div>
+
+  <main class="main-content">
+    <!-- Filter Panel -->
+    <div id="filter-panel" class="filter-panel hidden">
+      <div class="filter-row">
+        <div class="filter-group">
+          <label class="filter-label">Type</label>
+          <select id="filter-type" class="filter-select">
+            <option value="">Any</option>
+            <option value="creature">Creature</option>
+            <option value="instant">Instant</option>
+            <option value="sorcery">Sorcery</option>
+            <option value="enchantment">Enchantment</option>
+            <option value="artifact">Artifact</option>
+            <option value="land">Land</option>
+            <option value="planeswalker">Planeswalker</option>
+            <option value="battle">Battle</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label class="filter-label">Colors</label>
+          <div class="color-checkboxes">
+            <label class="color-btn" data-color="w" style="--c:#f8e3a1;">W</label>
+            <label class="color-btn" data-color="u" style="--c:#b3d9f7;">U</label>
+            <label class="color-btn" data-color="b" style="--c:#a3a3a3;">B</label>
+            <label class="color-btn" data-color="r" style="--c:#f5a88b;">R</label>
+            <label class="color-btn" data-color="g" style="--c:#9bd49b;">G</label>
+            <label class="color-btn" data-color="c" style="--c:#d4b896;">C</label>
+            <label class="color-btn" data-color="m" style="--c:#d9a8d9;">M</label>
+          </div>
+        </div>
+
+        <div class="filter-group">
+          <label class="filter-label">Mana Value</label>
+          <select id="filter-cmc" class="filter-select">
+            <option value="">Any</option>
+            <option value="0">0</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+            <option value="7+">7+</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label class="filter-label">Rarity</label>
+          <select id="filter-rarity" class="filter-select">
+            <option value="">Any</option>
+            <option value="common">Common</option>
+            <option value="uncommon">Uncommon</option>
+            <option value="rare">Rare</option>
+            <option value="mythic">Mythic</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label class="filter-label">Format</label>
+          <select id="filter-format" class="filter-select">
+            <option value="">Any</option>
+            <option value="standard">Standard</option>
+            <option value="pioneer">Pioneer</option>
+            <option value="modern">Modern</option>
+            <option value="legacy">Legacy</option>
+            <option value="vintage">Vintage</option>
+            <option value="commander">Commander</option>
+            <option value="pauper">Pauper</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="filter-row">
+        <div class="filter-group">
+          <label class="filter-label">Creature Type</label>
+          <input type="text" id="filter-subtype" class="filter-input" placeholder="e.g. Goblin, Elf, Dragon">
+        </div>
+
+        <div class="filter-group">
+          <label class="filter-label">Power</label>
+          <select id="filter-power" class="filter-select">
+            <option value="">Any</option>
+            <option value="0">0</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+            <option value="7">7</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label class="filter-label">Toughness</label>
+          <select id="filter-toughness" class="filter-select">
+            <option value="">Any</option>
+            <option value="0">0</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+            <option value="7">7</option>
+          </select>
+        </div>
+
+        <div class="filter-actions">
+          <button id="apply-filters" class="search-button">Apply</button>
+          <button id="clear-filters" class="clear-button">Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="loading" class="loading hidden">
+      <div class="spinner"></div>
+      <p>Searching for cards...</p>
+    </div>
+
+    <div id="error-message" class="error-message hidden"></div>
+
+    <div id="results-info" class="results-info hidden">
+      <span id="total-cards"></span>
+      <span id="current-page-info"></span>
+      <span id="active-filters" class="active-filters hidden"></span>
+    </div>
+
+    <div id="cards-grid" class="cards-grid"></div>
+
+    <div id="pagination" class="pagination hidden">
+      <button id="prev-page" class="pagination-button" disabled>← Previous</button>
+      <span id="page-indicator" class="page-indicator"></span>
+      <button id="next-page" class="pagination-button">Next →</button>
+    </div>
+  </main>
+
+  <!-- Card Detail Modal -->
+  <div id="card-modal" class="modal hidden">
+    <div class="modal-overlay" id="modal-overlay"></div>
+    <div class="modal-content modal-content--wide">
+      <button class="modal-close" id="modal-close">&times;</button>
+      <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
