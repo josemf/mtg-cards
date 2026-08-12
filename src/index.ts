@@ -243,13 +243,129 @@ app.get('/api/cards/:id/versions', async (req, res) => {
   }
 });
 
-// API endpoint: proxy to Moxfield public API to fetch a user's collection
-// Moxfield collections must be public for this to work without auth.
+// API endpoint: sync Moxfield collection using API key
+// Accepts { username, apiKey } and proxies authenticated requests to Moxfield's API
+app.post('/api/moxfield/sync', express.json(), async (req, res) => {
+  try {
+    const { username, apiKey } = req.body;
+    if (!username || !apiKey) {
+      return res.status(400).json({ error: 'Username and API key are required' });
+    }
+
+    const authHeaders = {
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+      'User-Agent': 'MTGCardsApp/1.0',
+    };
+
+    // Step 1: Fetch the user's collections
+    const collectionsRes = await fetch(
+      `https://api.moxfield.com/v2/users/${encodeURIComponent(username)}/collections`,
+      { headers: authHeaders }
+    );
+
+    if (collectionsRes.status === 401 || collectionsRes.status === 403) {
+      return res.status(401).json({ error: 'Invalid API key or unauthorized. Check your Moxfield API key.' });
+    }
+
+    if (collectionsRes.status === 404) {
+      return res.status(404).json({ error: `Moxfield user "${username}" not found` });
+    }
+
+    if (!collectionsRes.ok) {
+      const text = await collectionsRes.text();
+      // Check if it's a Cloudflare block
+      if (text.includes('Cloudflare') || text.includes('Attention Required')) {
+        return res.status(502).json({ error: 'Moxfield API is behind Cloudflare and cannot be reached from this server. Try using the Import feature instead.' });
+      }
+      return res.status(collectionsRes.status).json({ error: `Moxfield API error: ${collectionsRes.status}` });
+    }
+
+    let collectionsData: any;
+    try {
+      collectionsData = await collectionsRes.json();
+    } catch {
+      return res.status(502).json({ error: 'Moxfield returned unexpected data (possibly a Cloudflare block). Try using the Import feature instead.' });
+    }
+
+    // collectionsData could be an array of collections or an object with collections
+    const collections = Array.isArray(collectionsData) ? collectionsData : (collectionsData.collections || collectionsData.data || []);
+
+    if (collections.length === 0) {
+      return res.json({ username, cards: [], note: 'No collections found for this user.' });
+    }
+
+    // Step 2: Fetch cards from each collection
+    const allCards: Record<string, { name: string; oracle_id: string; quantity: number }> = {};
+    let totalCards = 0;
+    const collectionNames: string[] = [];
+
+    for (const collection of collections) {
+      const collId = collection.id || collection.publicId;
+      const collName = collection.name || collection.displayName || 'Unknown';
+      collectionNames.push(collName);
+
+      if (!collId) continue;
+
+      // Fetch cards page by page
+      let page = 1;
+      let hasMore = true;
+      while (hasMore) {
+        const cardsRes = await fetch(
+          `https://api.moxfield.com/v2/collections/${encodeURIComponent(collId)}/cards?page=${page}&pageSize=100`,
+          { headers: authHeaders }
+        );
+
+        if (!cardsRes.ok) break;
+
+        let cardsData: any;
+        try {
+          cardsData = await cardsRes.json();
+        } catch {
+          break;
+        }
+
+        const cardEntries = cardsData.data || cardsData.cards || cardsData;
+        for (const entry of cardEntries) {
+          const cardName = entry.name || entry.card?.name;
+          const oracleId = entry.oracleId || entry.oracle_id || entry.card?.oracle_id || entry.card?.oracleId;
+          const qty = entry.quantity || entry.count || 1;
+
+          if (cardName && oracleId) {
+            const key = oracleId;
+            if (allCards[key]) {
+              allCards[key].quantity += qty;
+            } else {
+              allCards[key] = { name: cardName, oracle_id: oracleId, quantity: qty };
+            }
+            totalCards += qty;
+          }
+        }
+
+        hasMore = Boolean(cardsData.hasMore || cardsData.has_more);
+        page++;
+      }
+    }
+
+    const cards = Object.values(allCards);
+
+    res.json({
+      username,
+      collections: collectionNames,
+      cards,
+      totalCards,
+    });
+  } catch (error) {
+    console.error('Error syncing Moxfield collection:', error);
+    res.status(500).json({ error: 'Failed to sync Moxfield collection. The API may be blocked by Cloudflare.' });
+  }
+});
+
+// API endpoint: proxy to Moxfield public API to fetch a user's profile
 app.get('/api/collection/:username', async (req, res) => {
   try {
     const { username } = req.params;
 
-    // First, try to get the user's profile to verify they exist
     const profileRes = await fetch(`https://api.moxfield.com/v2/users/${encodeURIComponent(username)}`, {
       headers: { 'Accept': 'application/json' },
     });
@@ -261,22 +377,10 @@ app.get('/api/collection/:username', async (req, res) => {
       return res.status(profileRes.status).json({ error: 'Failed to fetch Moxfield profile' });
     }
 
-    // Try to fetch public collections. We'll do this in two ways:
-    // 1. Try the Moxfield API collections endpoint
-    // 2. If that fails (needs auth), fall back to checking by known collection names
-    let cards: MoxfieldCardEntry[] = [];
-    let collectionName = '';
-
-    // Attempt to fetch the default "Collection" binder which is often public
-    // Moxfield API: GET /v2/users/{username}/collections needs auth,
-    // but individual collection pages are public.
-    // We use the Scryfall oracle_id to match cards instead.
-
     res.json({
       username,
       found: true,
-      cards: [],
-      note: 'Moxfield API requires authentication for collection access. Please use the "Import Collection" feature to paste your cards.',
+      note: 'Profile found. To sync your collection, enter your Moxfield API key below.',
       public_url: `https://www.moxfield.com/users/${username}`,
     });
   } catch (error) {
