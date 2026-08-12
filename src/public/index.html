@@ -31,17 +31,27 @@
   <div id="collection-panel" class="filter-panel hidden">
     <div class="filter-row">
       <div class="filter-group" style="flex:1;">
-        <label class="filter-label">Moxfield Username (optional)</label>
+        <label class="filter-label">Moxfield Username</label>
         <div style="display:flex;gap:0.5rem;">
           <input type="text" id="moxfield-username" class="filter-input" placeholder="Enter Moxfield username..." style="flex:1;min-width:200px;">
-          <button id="moxfield-fetch-btn" class="search-button">Load</button>
+          <button id="moxfield-fetch-btn" class="search-button">Verify</button>
         </div>
-        <span style="font-size:0.75rem;color:var(--color-text-muted);">Your collection must be <strong>public</strong> on Moxfield. Or paste cards below.</span>
+        <span style="font-size:0.75rem;color:var(--color-text-muted);">Verifies your Moxfield profile exists.</span>
       </div>
     </div>
     <div class="filter-row">
       <div class="filter-group" style="flex:1;">
-        <label class="filter-label">Import Collection</label>
+        <label class="filter-label">Moxfield API Key <span style="color:var(--color-text-muted);font-weight:400;">(from Moxfield Account Settings → API)</span></label>
+        <div style="display:flex;gap:0.5rem;">
+          <input type="password" id="moxfield-apikey" class="filter-input" placeholder="Enter your Moxfield API key..." style="flex:1;min-width:300px;font-family:monospace;font-size:0.8rem;">
+          <button id="moxfield-sync-btn" class="search-button">Sync Collection</button>
+        </div>
+        <span style="font-size:0.75rem;color:var(--color-text-muted);">Your API key is sent to our server to proxy the request — it is <strong>not</strong> stored on the server.</span>
+      </div>
+    </div>
+    <div class="filter-row">
+      <div class="filter-group" style="flex:1;">
+        <label class="filter-label">Or Import Manually</label>
         <textarea id="collection-import" class="filter-input" style="width:100%;min-height:100px;resize:vertical;font-family:monospace;font-size:0.8rem;" placeholder="Paste your cards here, one per line. Formats:&#10;4 Llanowar Elves&#10;3x Counterspell (FND)&#10;2 Llanowar Elves (Foundations) #123&#10;1 Card Name (SET)"></textarea>
         <div style="display:flex;gap:0.5rem;margin-top:0.5rem;align-items:center;flex-wrap:wrap;">
           <button id="collection-import-btn" class="search-button">Import</button>
