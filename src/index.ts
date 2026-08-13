@@ -291,7 +291,7 @@ app.get('/api/collection', (_req, res) => {
 // Resolves names to oracle_ids (via Scryfall search or direct scryfall_id lookup),
 // then stores in DB. mode "replace" clears the table first; mode "merge" adds to
 // existing quantities.
-app.post('/api/collection/import', express.json(), async (req, res) => {
+app.post('/api/collection/import', express.json({ limit: '50mb' }), async (req, res) => {
   try {
     const { mode, cards } = req.body as { mode: 'replace' | 'merge'; cards: { name: string; quantity: number; scryfall_id?: string; set?: string }[] };
     if (!['replace', 'merge'].includes(mode)) {
