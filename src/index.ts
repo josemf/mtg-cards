@@ -243,132 +243,15 @@ app.get('/api/cards/:id/versions', async (req, res) => {
   }
 });
 
-// API endpoint: sync Moxfield collection using API key
-// Accepts { username, apiKey } and proxies authenticated requests to Moxfield's API
-app.post('/api/moxfield/sync', express.json(), async (req, res) => {
-  try {
-    const { username, apiKey } = req.body;
-    if (!username || !apiKey) {
-      return res.status(400).json({ error: 'Username and API key are required' });
-    }
-
-    const authHeaders = {
-      'Accept': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
-    };
-
-    // Step 1: Fetch the user's collections
-    const collectionsRes = await fetch(
-      `https://api.moxfield.com/v2/users/${encodeURIComponent(username)}/collections`,
-      { headers: authHeaders }
-    );
-
-    if (collectionsRes.status === 401 || collectionsRes.status === 403) {
-      return res.status(401).json({ error: 'Invalid API key or unauthorized. Check your Moxfield API key.' });
-    }
-
-    if (collectionsRes.status === 404) {
-      return res.status(404).json({ error: `Moxfield user "${username}" not found` });
-    }
-
-    if (!collectionsRes.ok) {
-      const text = await collectionsRes.text();
-      // Check if it's a Cloudflare block
-      if (text.includes('Cloudflare') || text.includes('Attention Required')) {
-        return res.status(502).json({ error: 'Moxfield API is behind Cloudflare and cannot be reached from this server. Try using the Import feature instead.' });
-      }
-      return res.status(collectionsRes.status).json({ error: `Moxfield API error: ${collectionsRes.status}` });
-    }
-
-    let collectionsData: any;
-    try {
-      collectionsData = await collectionsRes.json();
-    } catch {
-      return res.status(502).json({ error: 'Moxfield returned unexpected data (possibly a Cloudflare block). Try using the Import feature instead.' });
-    }
-
-    // collectionsData could be an array of collections or an object with collections
-    const collections = Array.isArray(collectionsData) ? collectionsData : (collectionsData.collections || collectionsData.data || []);
-
-    if (collections.length === 0) {
-      return res.json({ username, cards: [], note: 'No collections found for this user.' });
-    }
-
-    // Step 2: Fetch cards from each collection
-    const allCards: Record<string, { name: string; oracle_id: string; quantity: number }> = {};
-    let totalCards = 0;
-    const collectionNames: string[] = [];
-
-    for (const collection of collections) {
-      const collId = collection.id || collection.publicId;
-      const collName = collection.name || collection.displayName || 'Unknown';
-      collectionNames.push(collName);
-
-      if (!collId) continue;
-
-      // Fetch cards page by page
-      let page = 1;
-      let hasMore = true;
-      while (hasMore) {
-        const cardsRes = await fetch(
-          `https://api.moxfield.com/v2/collections/${encodeURIComponent(collId)}/cards?page=${page}&pageSize=100`,
-          { headers: authHeaders }
-        );
-
-        if (!cardsRes.ok) break;
-
-        let cardsData: any;
-        try {
-          cardsData = await cardsRes.json();
-        } catch {
-          break;
-        }
-
-        const cardEntries = cardsData.data || cardsData.cards || cardsData;
-        for (const entry of cardEntries) {
-          const cardName = entry.name || entry.card?.name;
-          const oracleId = entry.oracleId || entry.oracle_id || entry.card?.oracle_id || entry.card?.oracleId;
-          const qty = entry.quantity || entry.count || 1;
-
-          if (cardName && oracleId) {
-            const key = oracleId;
-            if (allCards[key]) {
-              allCards[key].quantity += qty;
-            } else {
-              allCards[key] = { name: cardName, oracle_id: oracleId, quantity: qty };
-            }
-            totalCards += qty;
-          }
-        }
-
-        hasMore = Boolean(cardsData.hasMore || cardsData.has_more);
-        page++;
-      }
-    }
-
-    const cards = Object.values(allCards);
-
-    res.json({
-      username,
-      collections: collectionNames,
-      cards,
-      totalCards,
-    });
-  } catch (error) {
-    console.error('Error syncing Moxfield collection:', error);
-    res.status(500).json({ error: 'Failed to sync Moxfield collection. The API may be blocked by Cloudflare.' });
-  }
-});
-
 // API endpoint: verify a Moxfield username exists by checking their profile page
 app.get('/api/collection/:username', async (req, res) => {
   try {
     const { username } = req.params;
 
     // Use the Moxfield website profile page to verify the user exists.
-    // The API (api.moxfield.com) is behind Cloudflare and blocks non-browser requests,
-    // but the website profile pages are accessible and return proper 200/404.
+    // Moxfield has no public API (per their FAQ), so we can only check
+    // that the profile page exists. The website returns 200 for real
+    // users and 404 for fake ones.
     const profileRes = await fetch(`https://www.moxfield.com/users/${encodeURIComponent(username)}`, {
       headers: {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -383,13 +266,13 @@ app.get('/api/collection/:username', async (req, res) => {
     }
 
     if (!profileRes.ok) {
-      return res.status(502).json({ error: 'Could not verify Moxfield profile (service may be blocked). Try using the API key directly.' });
+      return res.status(502).json({ error: 'Could not verify Moxfield profile (service may be blocked). You can still use the Import feature below.' });
     }
 
     res.json({
       username,
       found: true,
-      note: 'Profile found. Enter your API key below and click Sync Collection.',
+      note: 'Profile found. Moxfield has no public API, so use the Import feature below to add cards.',
       public_url: `https://www.moxfield.com/users/${username}`,
     });
   } catch (error) {

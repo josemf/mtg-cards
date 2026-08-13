@@ -4,7 +4,7 @@
   "description": "MTG Cards viewer - a paged card browser with search powered by the Scryfall API",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc && cp -r src/public/ dist/public/",
+    "build": "tsc && rm -rf dist/public && cp -r src/public dist/public",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts"
   },

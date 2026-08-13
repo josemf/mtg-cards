@@ -55,8 +55,6 @@ const collectionToggle = document.getElementById('collection-toggle');
 const collectionPanel = document.getElementById('collection-panel');
 const moxfieldUsername = document.getElementById('moxfield-username');
 const moxfieldFetchBtn = document.getElementById('moxfield-fetch-btn');
-const moxfieldApiKey = document.getElementById('moxfield-apikey');
-const moxfieldSyncBtn = document.getElementById('moxfield-sync-btn');
 const collectionImport = document.getElementById('collection-import');
 const collectionImportBtn = document.getElementById('collection-import-btn');
 const collectionClearBtn = document.getElementById('collection-clear-btn');
@@ -120,9 +118,7 @@ collectionToggle.addEventListener('click', () => {
   collectionToggle.classList.toggle('active');
 });
 
-// Moxfield username fetch — verify the user exists via their profile page
-// We do this from the frontend (browser) since the browser can handle Cloudflare.
-// The backend can't reach moxfield.com reliably (Cloudflare blocks non-browser requests).
+// Moxfield username fetch — check if the profile exists on moxfield.com
 moxfieldFetchBtn.addEventListener('click', async () => {
   const username = moxfieldUsername.value.trim();
   if (!username) {
@@ -131,81 +127,15 @@ moxfieldFetchBtn.addEventListener('click', async () => {
   }
   setCollectionStatus('Checking Moxfield profile...', '');
   try {
-    // Try the backend proxy first (works if the server IP isn't blocked)
     const res = await fetch(`/api/collection/${encodeURIComponent(username)}`);
     const data = await res.json();
     if (res.ok && data.found) {
-      setCollectionStatus(`Profile found: ${data.public_url}. Enter your API key and click Sync.`, 'muted');
-      return;
-    }
-    // Backend couldn't verify — try from the browser directly
-    const directRes = await fetch(`https://www.moxfield.com/users/${encodeURIComponent(username)}`, {
-      method: 'HEAD',
-      mode: 'no-cors',
-    });
-    // With no-cors we can't read the status, but if it doesn't throw, the user likely exists
-    setCollectionStatus(
-      `Could not verify through server (Cloudflare). Enter your API key and click Sync to test directly.`,
-      'muted'
-    );
-  } catch (err) {
-    // Browser check also failed — just let the user try syncing
-    setCollectionStatus('Enter your API key and click Sync to connect.', 'muted');
-  }
-});
-
-// Moxfield API key sync
-moxfieldSyncBtn.addEventListener('click', async () => {
-  const username = moxfieldUsername.value.trim();
-  const apiKey = moxfieldApiKey.value.trim();
-  if (!username) {
-    setCollectionStatus('Enter your Moxfield username first', 'error');
-    return;
-  }
-  if (!apiKey) {
-    setCollectionStatus('Enter your Moxfield API key', 'error');
-    return;
-  }
-  setCollectionStatus('Syncing collection from Moxfield...', '');
-  try {
-    const res = await fetch('/api/moxfield/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, apiKey }),
-    });
-    const data = await res.json();
-
-    if (!res.ok) {
-      setCollectionStatus(data.error || 'Sync failed', 'error');
-      return;
-    }
-
-    // Merge synced cards into collection
-    if (data.cards && data.cards.length > 0) {
-      let added = 0;
-      for (const card of data.cards) {
-        const key = card.oracle_id;
-        const current = collection[key] || 0;
-        collection[key] = current + card.quantity;
-        added += card.quantity;
-      }
-
-      collectionCount = Object.values(collection).reduce((sum, qty) => sum + (Number(qty) || 0), 0);
-      saveCollection();
-      updateCollectionUI();
-
-      const collNames = data.collections ? data.collections.join(', ') : '';
-      setCollectionStatus(`✅ Synced ${added} cards from ${data.totalCards} total${collNames ? ' (' + collNames + ')' : ''}`, '');
-
-      refreshOwnedBadges();
-      if (!cardModal.classList.contains('hidden') && currentCardId) {
-        refreshModalOwned();
-      }
+      setCollectionStatus(`Profile found: ${data.public_url}. Moxfield has no public API, so use the Import section below.`, 'muted');
     } else {
-      setCollectionStatus(data.note || 'No cards found in collection', 'muted');
+      setCollectionStatus(data.error || 'Profile not found', 'error');
     }
   } catch (err) {
-    setCollectionStatus('Error syncing collection', 'error');
+    setCollectionStatus('Could not reach the server', 'error');
   }
 });
 
