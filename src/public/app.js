@@ -326,7 +326,11 @@ async function performSearch(page) {
       params.set(key, value);
     }
 
-    const response = await fetch(`/api/cards?${params}`);
+    // Route to local collection search or Scryfall proxy
+    const collectionOnly = collectionOnlyToggle && collectionOnlyToggle.checked;
+    const endpoint = collectionOnly ? '/api/collection/search' : `/api/cards?${params}`;
+
+    const response = await fetch(endpoint);
 
     if (!response.ok) {
       const data = await response.json();
@@ -338,15 +342,6 @@ async function performSearch(page) {
     totalCards = data.total_cards || 0;
     totalPages = data.total_pages || 1;
     let cards = data.data || [];
-
-    // Filter by local collection when "Collection only" is checked
-    const collectionOnly = collectionOnlyToggle && collectionOnlyToggle.checked;
-    if (collectionOnly && cards.length > 0) {
-      cards = cards.filter(c => c.oracle_id && collection[c.oracle_id] > 0);
-      // Adjust total to match filtered count (approximate — we only see the current page)
-      totalCards = cards.length;
-      totalPages = 1;
-    }
 
     if (cards.length === 0) {
       throw new Error(collectionOnly
@@ -673,31 +668,73 @@ async function loadCollection() {
 }
 
 async function importToServer(cards, mode) {
-  setCollectionStatus(`Resolving ${cards.length} cards...`, '');
+  const CHUNK_SIZE = 100;
+  const totalChunks = Math.ceil(cards.length / CHUNK_SIZE);
+
+  // Show progress bar
+  const progressBar = document.getElementById('import-progress');
+  const progressContainer = document.getElementById('import-progress-container');
+  const progressText = document.getElementById('import-progress-text');
+  if (progressContainer) progressContainer.classList.remove('hidden');
+
+  setCollectionStatus(`Importing ${cards.length} cards...`, '');
+  const jobId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  let totalProcessed = 0;
+  let allErrors = [];
+
   try {
-    const res = await fetch('/api/collection/import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, cards }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setCollectionStatus(data.error || 'Import failed', 'error');
-      return;
+    for (let i = 0; i < cards.length; i += CHUNK_SIZE) {
+      const chunk = cards.slice(i, i + CHUNK_SIZE);
+      const chunkNum = Math.floor(i / CHUNK_SIZE) + 1;
+      const percent = Math.round((i / cards.length) * 100);
+
+      if (progressBar) progressBar.style.width = `${percent}%`;
+      if (progressText) progressText.textContent = `Processing ${Math.min(i + CHUNK_SIZE, cards.length)} of ${cards.length} cards (chunk ${chunkNum}/${totalChunks})...`;
+
+      const res = await fetch('/api/collection/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode,
+          cards: chunk,
+          jobId,
+          isFirst: i === 0,
+          isLast: i + CHUNK_SIZE >= cards.length,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setCollectionStatus(data.error || 'Import failed', 'error');
+        if (progressContainer) progressContainer.classList.add('hidden');
+        return;
+      }
+      totalProcessed += data.chunkCards || 0;
+      if (data.errors) allErrors.push(...data.errors);
     }
-    // Reload collection from server to get resolved state
+
+    // Complete
+    if (progressBar) progressBar.style.width = '100%';
+    if (progressText) progressText.textContent = 'Import complete!';
+
+    // Reload collection from server
     await loadCollection();
-    let msg = `✅ Imported ${data.totalCards} card${data.totalCards !== 1 ? 's' : ''}`;
-    if (data.errors && data.errors.length > 0) {
-      msg += `. ${data.errors.length} card${data.errors.length !== 1 ? 's' : ''} could not be resolved`;
+    let msg = `✅ Imported ${totalProcessed} card${totalProcessed !== 1 ? 's' : ''}`;
+    if (allErrors.length > 0) {
+      msg += `. ${allErrors.length} card${allErrors.length !== 1 ? 's' : ''} could not be resolved`;
     }
     setCollectionStatus(msg, '');
+
+    // Hide progress after a delay
+    if (progressContainer) {
+      setTimeout(() => progressContainer.classList.add('hidden'), 3000);
+    }
     refreshOwnedBadges();
     if (!cardModal.classList.contains('hidden') && currentCardId) {
       refreshModalOwned();
     }
   } catch (err) {
     setCollectionStatus('Error importing collection', 'error');
+    if (progressContainer) progressContainer.classList.add('hidden');
   }
 }
 

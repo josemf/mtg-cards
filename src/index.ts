@@ -10,6 +10,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS cards (
   name TEXT NOT NULL,
   quantity INTEGER NOT NULL DEFAULT 1
 )`);
+db.exec(`CREATE TABLE IF NOT EXISTS card_cache (
+  oracle_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  data TEXT NOT NULL,
+  fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
 
 // Prepared statements — cached for reuse across requests
 const stmtGetAll = db.prepare('SELECT oracle_id, name, quantity FROM cards ORDER BY name');
@@ -17,6 +23,7 @@ const stmtUpsert = db.prepare('INSERT INTO cards (oracle_id, name, quantity) VAL
 const stmtReplace = db.prepare('INSERT OR REPLACE INTO cards (oracle_id, name, quantity) VALUES (?, ?, ?)');
 const stmtClear = db.prepare('DELETE FROM cards');
 const stmtDelete = db.prepare('DELETE FROM cards WHERE oracle_id = ?');
+const stmtCacheUpsert = db.prepare('INSERT OR REPLACE INTO card_cache (oracle_id, name, data) VALUES (?, ?, ?)');
 
 // Run DB operations inside a transaction helper
 function transaction<T>(fn: () => T): T {
@@ -95,6 +102,40 @@ const SCRYFALL_HEADERS = {
   'User-Agent': 'MTGCardsApp/1.0 (https://github.com/josemf/mtg-cards)',
   'Accept': 'application/json',
 };
+
+// ── Exponential backoff fetch ────────────────────────────────────────────────
+async function fetchWithBackoff(url: string, options: RequestInit, maxRetries = 5): Promise<Response> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const response = await fetch(url, options);
+    if (response.ok) return response;
+    if (response.status === 429) {
+      const retryAfter = parseInt(response.headers.get('retry-after') || '1', 10);
+      const delay = Math.pow(2, attempt) * 1000 + retryAfter * 1000;
+      console.warn(`Rate limited, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+      await new Promise(r => setTimeout(r, delay));
+      continue;
+    }
+    return response;
+  }
+  throw new Error(`Scryfall request failed after ${maxRetries} retries: ${url}`);
+}
+
+// ── Import progress tracking ─────────────────────────────────────────────────
+interface ImportProgress {
+  total: number;
+  processed: number;
+  errors: string[];
+  status: 'running' | 'complete' | 'error';
+}
+const importJobs = new Map<string, ImportProgress>();
+
+// ── Insert cards into card_cache ─────────────────────────────────────────────
+function cacheCards(cardData: { oracle_id: string; name: string; data: string }[]) {
+  const insert = db.prepare('INSERT OR REPLACE INTO card_cache (oracle_id, name, data) VALUES (?, ?, ?)');
+  for (const c of cardData) {
+    insert.run(c.oracle_id, c.name, c.data);
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -286,19 +327,36 @@ app.get('/api/collection', (_req, res) => {
   }
 });
 
-// POST /api/collection/import — import cards from resolved data
-// body: { mode: "replace" | "merge", cards: [{ name, quantity, scryfall_id?, set? }] }
-// Resolves names to oracle_ids (via Scryfall search or direct scryfall_id lookup),
-// then stores in DB. mode "replace" clears the table first; mode "merge" adds to
-// existing quantities.
+// POST /api/collection/import — import cards from resolved data (chunked)
+// body: { mode: "replace" | "merge", cards: [...], jobId?: string, isFirst?: boolean, isLast?: boolean }
+// Supports chunked upload: set jobId (same across chunks), isFirst=true on first chunk,
+// isLast=true on final chunk. Monolithic calls (no jobId) behave as before.
 app.post('/api/collection/import', express.json({ limit: '50mb' }), async (req, res) => {
   try {
-    const { mode, cards } = req.body as { mode: 'replace' | 'merge'; cards: { name: string; quantity: number; scryfall_id?: string; set?: string }[] };
+    const { mode, cards, jobId, isFirst, isLast } = req.body as {
+      mode: 'replace' | 'merge';
+      cards: { name: string; quantity: number; scryfall_id?: string; set?: string }[];
+      jobId?: string;
+      isFirst?: boolean;
+      isLast?: boolean;
+    };
     if (!['replace', 'merge'].includes(mode)) {
       return res.status(400).json({ error: 'mode must be "replace" or "merge"' });
     }
     if (!Array.isArray(cards) || cards.length === 0) {
       return res.status(400).json({ error: 'cards array is required and must not be empty' });
+    }
+
+    // If chunked, set up progress tracking
+    if (jobId) {
+      // Clear existing progress for this job
+      if (isFirst) {
+        importJobs.set(jobId, { total: 0, processed: 0, errors: [], status: 'running' });
+      }
+      const job = importJobs.get(jobId);
+      if (job) {
+        job.total += cards.length;
+      }
     }
 
     // Resolve each card to oracle_id via Scryfall.
@@ -338,22 +396,28 @@ app.post('/api/collection/import', express.json({ limit: '50mb' }), async (req, 
         const chunk = uniqueIds.slice(i, i + 75);
         const payload = { identifiers: chunk.map(([id]) => ({ id })) };
         try {
-          const response = await fetch('https://api.scryfall.com/cards/collection', {
+          const response = await fetchWithBackoff('https://api.scryfall.com/cards/collection', {
             method: 'POST',
             headers: { ...SCRYFALL_HEADERS, 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
           });
           if (response.ok) {
-            const data = await response.json() as { data: { id: string; oracle_id: string; name: string }[] };
-            const idMap = new Map(data.data.map(c => [c.id, { oracle_id: c.oracle_id, name: c.name }]));
+            const data = await response.json() as { data: any[] };
+            const idMap = new Map(data.data.map((c: any) => [c.id, c]));
+            const toCache: { oracle_id: string; name: string; data: string }[] = [];
             for (const [id, { name, quantity }] of chunk) {
               const match = idMap.get(id);
               if (match) {
                 resolved.push({ oracle_id: match.oracle_id, name: match.name, quantity });
+                // Cache the full card data
+                if (match.oracle_id) {
+                  toCache.push({ oracle_id: match.oracle_id, name: match.name, data: JSON.stringify(match) });
+                }
               } else {
                 errors.push(`Scryfall returned no data for id "${id}" ("${name}")`);
               }
             }
+            if (toCache.length > 0) cacheCards(toCache);
           } else {
             for (const [, { name }] of chunk) {
               errors.push(`Could not resolve scryfall_id for "${name}" (batch request failed)`);
@@ -406,15 +470,19 @@ app.post('/api/collection/import', express.json({ limit: '50mb' }), async (req, 
           }
           const data = (await response.json()) as ScryfallResponse;
           const oracleMap = new Map<string, { name: string; oracle_id: string }>();
+          const toCache: { oracle_id: string; name: string; data: string }[] = [];
           for (const card of data.data) {
             const oid = card.oracle_id || '';
             if (oid && !oracleMap.has(oid)) {
               oracleMap.set(oid, { name: card.name, oracle_id: oid });
+              // Cache the full card data (first occurrence of each oracle_id)
+              toCache.push({ oracle_id: oid, name: card.name, data: JSON.stringify(card) });
             }
           }
           const first = oracleMap.values().next().value;
           if (first) {
             resolved.push({ oracle_id: first.oracle_id, name: first.name, quantity });
+            if (toCache.length > 0) cacheCards(toCache);
           } else {
             errors.push(`No oracle_id found for "${lcName}"`);
           }
@@ -426,7 +494,7 @@ app.post('/api/collection/import', express.json({ limit: '50mb' }), async (req, 
 
     // Write to DB in a transaction
     transaction(() => {
-      if (mode === 'replace') {
+      if (mode === 'replace' && (!jobId || isFirst)) {
         stmtClear.run();
         for (const card of resolved) {
           stmtReplace.run(card.oracle_id, card.name, card.quantity);
@@ -438,8 +506,33 @@ app.post('/api/collection/import', express.json({ limit: '50mb' }), async (req, 
       }
     });
 
-    const total = resolved.reduce((s, c) => s + c.quantity, 0);
-    res.json({ imported: resolved.length, totalCards: total, errors });
+    // Update progress
+    if (jobId) {
+      const job = importJobs.get(jobId);
+      if (job) {
+        job.processed += resolved.length;
+        job.errors.push(...errors);
+        if (isLast) {
+          job.status = 'complete';
+        }
+      }
+    }
+
+    // For chunked calls, return progress; for monolithic, return full result
+    if (jobId) {
+      const job = importJobs.get(jobId);
+      res.json({
+        jobId,
+        processed: job?.processed ?? resolved.length,
+        total: job?.total ?? resolved.length,
+        chunkCards: resolved.length,
+        status: job?.status ?? 'running',
+        errors: errors.slice(0, 20), // limit error detail per chunk
+      });
+    } else {
+      const total = resolved.reduce((s, c) => s + c.quantity, 0);
+      res.json({ imported: resolved.length, totalCards: total, errors });
+    }
   } catch (error) {
     console.error('Error importing collection:', error);
     res.status(500).json({ error: 'Failed to import collection' });
@@ -470,7 +563,174 @@ app.post('/api/collection/delete', express.json(), (req, res) => {
   }
 });
 
-// Fallback: serve index.html for all other routes
+// ── Backfill card_cache from existing collection ────────────────────────────
+// POST /api/collection/cache-backfill — fills missing card_cache entries from
+// the existing collection by fetching from Scryfall. Runs in chunks with progress.
+app.post('/api/collection/cache-backfill', express.json(), async (req, res) => {
+  try {
+    const cards = stmtGetAll.all() as { oracle_id: string; name: string; quantity: number }[];
+    const cacheCheck = db.prepare('SELECT 1 FROM card_cache WHERE oracle_id = ?');
+    const missing = cards.filter(c => !cacheCheck.get(c.oracle_id));
+
+    if (missing.length === 0) {
+      return res.json({ cached: 0, total: cards.length, message: 'cache is already up to date' });
+    }
+
+    // Fetch missing cards from Scryfall in batches of 75
+    let cached = 0;
+    const errors: string[] = [];
+
+    for (let i = 0; i < missing.length; i += 75) {
+      const chunk = missing.slice(i, i + 75);
+      const payload = { identifiers: chunk.map(c => ({ oracle_id: c.oracle_id })) };
+      try {
+        const response = await fetchWithBackoff('https://api.scryfall.com/cards/collection', {
+          method: 'POST',
+          headers: { ...SCRYFALL_HEADERS, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (response.ok) {
+          const data = await response.json() as { data: any[] };
+          const toCache: { oracle_id: string; name: string; data: string }[] = [];
+          for (const card of data.data) {
+            if (card.oracle_id) {
+              toCache.push({ oracle_id: card.oracle_id, name: card.name, data: JSON.stringify(card) });
+            }
+          }
+          if (toCache.length > 0) {
+            cacheCards(toCache);
+            cached += toCache.length;
+          }
+        } else {
+          errors.push(`Batch request failed at offset ${i}`);
+        }
+      } catch {
+        errors.push(`Error fetching batch at offset ${i}`);
+      }
+      if (i + 75 < missing.length) await new Promise(r => setTimeout(r, 200));
+    }
+
+    res.json({ cached, total: cards.length, errors: errors.slice(0, 20) });
+  } catch (error) {
+    console.error('Error backfilling cache:', error);
+    res.status(500).json({ error: 'Backfill failed' });
+  }
+});
+
+// ── Import progress endpoint ─────────────────────────────────────────────────
+app.get('/api/collection/import/status/:jobId', (req, res) => {
+  const job = importJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json(job);
+});
+
+// ── Local collection search ──────────────────────────────────────────────────
+// Searches card_cache (full Scryfall card data cached during import) filtered
+// to only cards the user owns (via JOIN with cards table). Returns same format
+// as the Scryfall proxy so the frontend can use identical rendering.
+// Only for "collection only" mode — full Scryfall search is still proxied.
+app.get('/api/collection/search', (req, res) => {
+  try {
+    const query = (req.query.q as string || '').trim();
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const pageSize = 20;
+    const offset = (page - 1) * pageSize;
+
+    // Build WHERE clause from search query + optional filter params
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    // Only show cards the user owns
+    conditions.push('c.quantity > 0');
+
+    // Full-text name search
+    if (query) {
+      const words = query.split(/\s+/).filter(Boolean);
+      for (const word of words) {
+        conditions.push('cc.name LIKE ?');
+        params.push(`%${word}%`);
+      }
+    }
+
+    // Type filter
+    const typeFilter = req.query.type as string;
+    if (typeFilter) {
+      conditions.push("LOWER(json_extract(cc.data, '$.type_line')) LIKE ?");
+      params.push(`%${typeFilter.toLowerCase()}%`);
+    }
+
+    // Rarity filter
+    const rarityFilter = req.query.rarity as string;
+    if (rarityFilter) {
+      conditions.push("LOWER(json_extract(cc.data, '$.rarity')) = ?");
+      params.push(rarityFilter.toLowerCase());
+    }
+
+    // CMC filter
+    const cmcFilter = req.query.cmc as string;
+    if (cmcFilter) {
+      conditions.push('json_extract(cc.data, \'$.cmc\') = ?');
+      params.push(parseFloat(cmcFilter));
+    }
+    // Note: format filtering is not supported in local search (dynamic key in legalities).
+    // Use Scryfall proxy search for format filtering.
+
+    // Color filter
+    const colorsFilter = req.query.colors as string;
+    if (colorsFilter) {
+      const colorLetters = colorsFilter.split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
+      for (const cl of colorLetters) {
+        conditions.push("json_extract(cc.data, '$.colors') LIKE ?");
+        params.push(`%"${cl}"%`);
+      }
+    }
+
+    // Power / toughness
+    const powerFilter = req.query.power as string;
+    if (powerFilter) {
+      conditions.push("json_extract(cc.data, '$.power') = ?");
+      params.push(powerFilter);
+    }
+    const toughnessFilter = req.query.toughness as string;
+    if (toughnessFilter) {
+      conditions.push("json_extract(cc.data, '$.toughness') = ?");
+      params.push(toughnessFilter);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    // Count total matching cards
+    const countStmt = db.prepare(`SELECT COUNT(*) as cnt FROM card_cache cc JOIN cards c ON c.oracle_id = cc.oracle_id ${whereClause}`);
+    const { cnt: totalCards } = countStmt.get(...params) as { cnt: number };
+    const totalPages = Math.ceil(totalCards / pageSize);
+
+    // Fetch page
+    const fetchStmt = db.prepare(`SELECT cc.data, c.quantity FROM card_cache cc JOIN cards c ON c.oracle_id = cc.oracle_id ${whereClause} ORDER BY cc.name LIMIT ? OFFSET ?`);
+    const rows = fetchStmt.all(...params, pageSize, offset) as { data: string; quantity: number }[];
+
+    // Parse JSON data and add owned quantity
+    const cards = rows.map(row => {
+      const card = JSON.parse(row.data);
+      card.owned_quantity = row.quantity;
+      return card;
+    });
+
+    res.json({
+      object: 'list',
+      total_cards: totalCards,
+      total_pages: totalPages,
+      has_more: page < totalPages,
+      data: cards,
+      search_query: query,
+      source: 'local',
+    });
+  } catch (error) {
+    console.error('Error searching collection:', error);
+    res.status(500).json({ error: 'Failed to search collection' });
+  }
+});
+
+// Fallback: serve index.html for all other routes (must be last)
 app.get('/{*path}', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });

@@ -718,6 +718,22 @@ label.filter-toggle input[type="checkbox"] {
   display: none !important;
 }
 
+/* ── Import progress bar ─────────────────────────────────────────────────── */
+.progress-bar-track {
+  flex: 1;
+  height: 8px;
+  background: var(--color-bg);
+  border-radius: 4px;
+  overflow: hidden;
+  min-width: 120px;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--color-primary, #a855f7), #7c3aed);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .header-content {
