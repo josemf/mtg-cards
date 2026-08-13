@@ -58,6 +58,7 @@ const collectionClearBtn = document.getElementById('collection-clear-btn');
 const collectionStatus = document.getElementById('collection-status');
 const collectionStats = document.getElementById('collection-stats');
 const collectionStatsRow = document.getElementById('collection-stats-row');
+const collectionOnlyToggle = document.getElementById('collection-only-toggle');
 // Provider system
 const providerBtns = document.querySelectorAll('.provider-btn');
 const providerPanels = {
@@ -92,6 +93,11 @@ modalClose.addEventListener('click', closeModal);
 filterToggle.addEventListener('click', () => {
   filterPanel.classList.toggle('hidden');
   filterToggle.classList.toggle('active');
+});
+
+// Collection-only toggle — re-filter on change
+collectionOnlyToggle.addEventListener('change', () => {
+  if (currentQuery) performSearch(1);
 });
 
 // Color button toggles
@@ -320,7 +326,11 @@ async function performSearch(page) {
       params.set(key, value);
     }
 
-    const response = await fetch(`/api/cards?${params}`);
+    // Route to local collection search or Scryfall proxy
+    const collectionOnly = collectionOnlyToggle && collectionOnlyToggle.checked;
+    const endpoint = collectionOnly ? '/api/collection/search' : `/api/cards?${params}`;
+
+    const response = await fetch(endpoint);
 
     if (!response.ok) {
       const data = await response.json();
@@ -331,10 +341,12 @@ async function performSearch(page) {
 
     totalCards = data.total_cards || 0;
     totalPages = data.total_pages || 1;
-    const cards = data.data || [];
+    let cards = data.data || [];
 
     if (cards.length === 0) {
-      throw new Error('No cards found. Try a different search.');
+      throw new Error(collectionOnly
+        ? 'No cards from your collection match this search. Try a different search or uncheck "Collection only".'
+        : 'No cards found. Try a different search.');
     }
 
     renderCards(cards);
@@ -429,10 +441,13 @@ function renderPagination() {
 function renderResultsInfo() {
   if (totalCards > 0) {
     resultsInfo.classList.remove('hidden');
-    totalCardsEl.textContent = `📊 ${totalCards} cards found`;
+    const collectionOnly = collectionOnlyToggle && collectionOnlyToggle.checked;
+    totalCardsEl.textContent = collectionOnly
+      ? `📊 ${totalCards} owned card${totalCards === 1 ? '' : 's'} found`
+      : `📊 ${totalCards} cards found`;
     const start = (currentPage - 1) * PAGE_SIZE + 1;
     const end = Math.min(currentPage * PAGE_SIZE, totalCards);
-    currentPageInfo.textContent = `Showing ${start}–${end}`;
+    currentPageInfo.textContent = `Showing ${start}–${end}${collectionOnly ? ' (collection only)' : ''}`;
 
     // Show active filters summary
     const summary = getFilterSummary();
@@ -653,46 +668,108 @@ async function loadCollection() {
 }
 
 async function importToServer(cards, mode) {
-  setCollectionStatus(`Resolving ${cards.length} cards...`, '');
+  const CHUNK_SIZE = 100;
+  const totalChunks = Math.ceil(cards.length / CHUNK_SIZE);
+
+  // Show progress bar
+  const progressBar = document.getElementById('import-progress');
+  const progressContainer = document.getElementById('import-progress-container');
+  const progressText = document.getElementById('import-progress-text');
+  if (progressContainer) progressContainer.classList.remove('hidden');
+
+  setCollectionStatus(`Importing ${cards.length} cards...`, '');
+  const jobId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  let totalProcessed = 0;
+  let allErrors = [];
+
   try {
-    const res = await fetch('/api/collection/import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, cards }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setCollectionStatus(data.error || 'Import failed', 'error');
-      return;
+    for (let i = 0; i < cards.length; i += CHUNK_SIZE) {
+      const chunk = cards.slice(i, i + CHUNK_SIZE);
+      const chunkNum = Math.floor(i / CHUNK_SIZE) + 1;
+      const percent = Math.round((i / cards.length) * 100);
+
+      if (progressBar) progressBar.style.width = `${percent}%`;
+      if (progressText) progressText.textContent = `Processing ${Math.min(i + CHUNK_SIZE, cards.length)} of ${cards.length} cards (chunk ${chunkNum}/${totalChunks})...`;
+
+      const res = await fetch('/api/collection/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode,
+          cards: chunk,
+          jobId,
+          isFirst: i === 0,
+          isLast: i + CHUNK_SIZE >= cards.length,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setCollectionStatus(data.error || 'Import failed', 'error');
+        if (progressContainer) progressContainer.classList.add('hidden');
+        return;
+      }
+      totalProcessed += data.chunkCards || 0;
+      if (data.errors) allErrors.push(...data.errors);
     }
-    // Reload collection from server to get resolved state
+
+    // Complete
+    if (progressBar) progressBar.style.width = '100%';
+    if (progressText) progressText.textContent = 'Import complete!';
+
+    // Reload collection from server
     await loadCollection();
-    let msg = `✅ Imported ${data.totalCards} card${data.totalCards !== 1 ? 's' : ''}`;
-    if (data.errors && data.errors.length > 0) {
-      msg += `. ${data.errors.length} card${data.errors.length !== 1 ? 's' : ''} could not be resolved`;
+    let msg = `✅ Imported ${totalProcessed} card${totalProcessed !== 1 ? 's' : ''}`;
+    if (allErrors.length > 0) {
+      msg += `. ${allErrors.length} card${allErrors.length !== 1 ? 's' : ''} could not be resolved`;
     }
     setCollectionStatus(msg, '');
+
+    // Hide progress after a delay
+    if (progressContainer) {
+      setTimeout(() => progressContainer.classList.add('hidden'), 3000);
+    }
     refreshOwnedBadges();
     if (!cardModal.classList.contains('hidden') && currentCardId) {
       refreshModalOwned();
     }
   } catch (err) {
     setCollectionStatus('Error importing collection', 'error');
+    if (progressContainer) progressContainer.classList.add('hidden');
   }
+}
+
+// Parse a single CSV row handling quoted fields (commas inside quotes are preserved)
+function parseCsvRow(line) {
+  const cols = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+    } else if (ch === ',' && !inQuotes) {
+      cols.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  cols.push(current.trim());
+  return cols;
 }
 
 function parseMoxfieldCsv(text) {
   const lines = text.split('\n').filter(l => l.trim());
   if (lines.length < 2) return [];
 
-  const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const header = parseCsvRow(lines[0]).map(h => h.toLowerCase());
   const countIdx = header.indexOf('count');
   const nameIdx = header.indexOf('name');
   if (countIdx === -1 || nameIdx === -1) return [];
 
   const byName = {};
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(',').map(c => c.trim());
+    const cols = parseCsvRow(lines[i]);
     const name = cols[nameIdx];
     if (!name) continue;
     const qty = parseInt(cols[countIdx], 10) || 1;
@@ -711,7 +788,7 @@ function parseManaboxCsv(text) {
   const lines = text.split('\n').filter(l => l.trim());
   if (lines.length < 2) return [];
 
-  const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const header = parseCsvRow(lines[0]).map(h => h.toLowerCase());
   const qtyIdx = header.indexOf('quantity');
   const nameIdx = header.indexOf('name');
   const scryfallIdx = header.indexOf('scryfall id');
@@ -724,7 +801,7 @@ function parseManaboxCsv(text) {
 
   const byScryfallId = {};
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(',').map(c => c.trim());
+    const cols = parseCsvRow(lines[i]);
     const name = cols[nameCol];
     if (!name) continue;
     const qty = parseInt(cols[qtyCol], 10) || 1;

@@ -23,6 +23,10 @@
         <button id="search-button" class="search-button">Search</button>
       </div>
       <button id="filter-toggle" class="filter-toggle" title="Toggle filters">⚙️ Filters</button>
+      <label class="filter-toggle" for="collection-only-toggle" title="Only show cards in your local collection">
+        <input type="checkbox" id="collection-only-toggle" style="accent-color:var(--accent,#a855f7);vertical-align:middle;margin-right:4px;">
+        Collection only
+      </label>
       <button id="collection-toggle" class="filter-toggle" title="My Collection">📦 Collection</button>
     </div>
   </header>
@@ -105,6 +109,18 @@
     <div class="filter-row" id="collection-stats-row" style="display:none;">
       <div class="filter-group">
         <span id="collection-stats" style="font-size:0.85rem;color:var(--color-success);"></span>
+      </div>
+    </div>
+
+    <!-- Import Progress Bar -->
+    <div id="import-progress-container" class="filter-row hidden" style="margin-top:0.5rem;">
+      <div class="filter-group" style="flex:1;">
+        <div style="display:flex;align-items:center;gap:0.75rem;">
+          <div class="progress-bar-track">
+            <div id="import-progress" class="progress-bar-fill" style="width:0%;"></div>
+          </div>
+          <span id="import-progress-text" style="font-size:0.8rem;color:var(--color-text-muted);white-space:nowrap;"></span>
+        </div>
       </div>
     </div>
   </div>
