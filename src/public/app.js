@@ -53,15 +53,26 @@ const modalBody = document.getElementById('modal-body');
 // Collection elements
 const collectionToggle = document.getElementById('collection-toggle');
 const collectionPanel = document.getElementById('collection-panel');
-const csvFileInput = document.getElementById('csv-file-input');
-const csvImportBtn = document.getElementById('csv-import-btn');
-const collectionImport = document.getElementById('collection-import');
 const collectionImportBtn = document.getElementById('collection-import-btn');
 const collectionClearBtn = document.getElementById('collection-clear-btn');
-const collectionReplaceChk = document.getElementById('collection-replace-chk');
 const collectionStatus = document.getElementById('collection-status');
 const collectionStats = document.getElementById('collection-stats');
 const collectionStatsRow = document.getElementById('collection-stats-row');
+// Provider system
+const providerBtns = document.querySelectorAll('.provider-btn');
+const providerPanels = {
+  moxfield: document.getElementById('provider-moxfield'),
+  manabox: document.getElementById('provider-manabox'),
+  manual: document.getElementById('provider-manual'),
+};
+const moxfieldCsvInput = document.getElementById('moxfield-csv-input');
+const manaboxCsvInput = document.getElementById('manabox-csv-input');
+const manualTextarea = document.getElementById('manual-textarea');
+// Confirmation modal
+const confirmModal = document.getElementById('confirm-modal');
+const confirmOverlay = document.getElementById('confirm-overlay');
+const confirmCancelBtn = document.getElementById('confirm-cancel-btn');
+const confirmOkBtn = document.getElementById('confirm-ok-btn');
 
 // Event listeners
 searchButton.addEventListener('click', () => performSearch(1));
@@ -119,38 +130,85 @@ collectionToggle.addEventListener('click', () => {
   collectionToggle.classList.toggle('active');
 });
 
-// CSV file import — parse, send to server with mode "replace"
-csvImportBtn.addEventListener('click', async () => {
-  const file = csvFileInput.files[0];
-  if (!file) {
-    setCollectionStatus('Select a CSV file first', 'error');
-    return;
-  }
-  const text = await file.text();
-  const cards = parseCsvText(text);
-  if (cards.length === 0) {
-    setCollectionStatus('No cards found in CSV', 'error');
-    return;
-  }
-  setCollectionStatus(`Importing ${cards.length} cards from CSV...`, '');
-  await importToServer(cards, 'replace');
+// Provider selector
+let activeProvider = 'moxfield';
+
+providerBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    providerBtns.forEach(b => b.classList.remove('selected'));
+    btn.classList.add('selected');
+    const provider = btn.dataset.provider;
+    activeProvider = provider;
+    Object.entries(providerPanels).forEach(([id, el]) => {
+      el.classList.toggle('hidden', id !== provider);
+    });
+  });
 });
 
-// Import collection from textarea
+// Single Import button — shows confirmation (for replace-style provider imports),
+// then parses + sends. Manual text import merges non-destructively, no confirm.
 collectionImportBtn.addEventListener('click', () => {
-  const text = collectionImport.value.trim();
-  if (!text) {
-    setCollectionStatus('Paste your cards first', 'error');
+  // Validate input based on active provider
+  let hasData = false;
+  if (activeProvider === 'moxfield') {
+    hasData = moxfieldCsvInput.files.length > 0;
+  } else if (activeProvider === 'manabox') {
+    hasData = manaboxCsvInput.files.length > 0;
+  } else if (activeProvider === 'manual') {
+    hasData = manualTextarea.value.trim().length > 0;
+  }
+  if (!hasData) {
+    setCollectionStatus('No data to import — select a file or paste cards', 'error');
     return;
   }
-  const cards = parseCollectionText(text);
-  if (cards.length === 0) {
-    setCollectionStatus('No cards found to import', 'error');
-    return;
+  if (activeProvider === 'manual') {
+    doImport();
+  } else {
+    confirmModal.classList.remove('hidden');
   }
-  const mode = collectionReplaceChk.checked ? 'replace' : 'merge';
-  importToServer(cards, mode);
 });
+
+confirmCancelBtn.addEventListener('click', () => confirmModal.classList.add('hidden'));
+confirmOverlay.addEventListener('click', () => confirmModal.classList.add('hidden'));
+
+confirmOkBtn.addEventListener('click', async () => {
+  confirmModal.classList.add('hidden');
+  await doImport();
+});
+
+async function doImport() {
+  let cards;
+  if (activeProvider === 'moxfield') {
+    const file = moxfieldCsvInput.files[0];
+    if (!file) return;
+    const text = await file.text();
+    cards = parseMoxfieldCsv(text);
+    if (cards.length === 0) {
+      setCollectionStatus('No cards found in CSV', 'error');
+      return;
+    }
+    await importToServer(cards, 'replace');
+  } else if (activeProvider === 'manabox') {
+    const file = manaboxCsvInput.files[0];
+    if (!file) return;
+    const text = await file.text();
+    cards = parseManaboxCsv(text);
+    if (cards.length === 0) {
+      setCollectionStatus('No cards found in CSV', 'error');
+      return;
+    }
+    await importToServer(cards, 'replace');
+  } else if (activeProvider === 'manual') {
+    const text = manualTextarea.value.trim();
+    if (!text) return;
+    cards = parseCollectionText(text);
+    if (cards.length === 0) {
+      setCollectionStatus('No cards found to import', 'error');
+      return;
+    }
+    await importToServer(cards, 'merge');
+  }
+}
 
 // Clear collection
 collectionClearBtn.addEventListener('click', async () => {
@@ -161,7 +219,7 @@ collectionClearBtn.addEventListener('click', async () => {
     if (!res.ok) throw new Error('clear failed');
     collection = {};
     collectionCount = 0;
-    collectionImport.value = '';
+    manualTextarea.value = '';
     updateCollectionUI();
     setCollectionStatus('Collection cleared', '');
     refreshOwnedBadges();
@@ -623,18 +681,15 @@ async function importToServer(cards, mode) {
   }
 }
 
-function parseCsvText(text) {
+function parseMoxfieldCsv(text) {
   const lines = text.split('\n').filter(l => l.trim());
   if (lines.length < 2) return [];
 
-  // Parse header row — find column indices
   const header = lines[0].split(',').map(h => h.trim().toLowerCase());
   const countIdx = header.indexOf('count');
   const nameIdx = header.indexOf('name');
   if (countIdx === -1 || nameIdx === -1) return [];
 
-  // Parse data rows, aggregate by name. If the card name is repeated (different
-  // editions / conditions / finishes), sum the quantities together.
   const byName = {};
   for (let i = 1; i < lines.length; i++) {
     const cols = lines[i].split(',').map(c => c.trim());
@@ -645,12 +700,47 @@ function parseCsvText(text) {
     if (byName[key]) {
       byName[key].quantity += qty;
     } else {
-      // Don't pass set code — Moxfield's edition codes don't always match
-      // Scryfall's. Exact name matching is more reliable.
-      byName[key] = { name, quantity: qty, set: '' };
+      // Don't pass set code — Moxfield's codes don't always match Scryfall's
+      byName[key] = { name, quantity: qty };
     }
   }
   return Object.values(byName);
+}
+
+function parseManaboxCsv(text) {
+  const lines = text.split('\n').filter(l => l.trim());
+  if (lines.length < 2) return [];
+
+  const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const qtyIdx = header.indexOf('quantity');
+  const nameIdx = header.indexOf('name');
+  const scryfallIdx = header.indexOf('scryfall id');
+  // Fallback column names
+  const qtyIdx2 = header.indexOf('count');
+  const nameIdx2 = header.indexOf('card');
+  const qtyCol = qtyIdx !== -1 ? qtyIdx : qtyIdx2;
+  const nameCol = nameIdx !== -1 ? nameIdx : nameIdx2;
+  if (qtyCol === -1 || nameCol === -1) return [];
+
+  const byScryfallId = {};
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(',').map(c => c.trim());
+    const name = cols[nameCol];
+    if (!name) continue;
+    const qty = parseInt(cols[qtyCol], 10) || 1;
+    const scryfallId = scryfallIdx !== -1 ? cols[scryfallIdx] : '';
+    // Group by scryfall_id when available, else by name
+    const key = scryfallId || name.toLowerCase();
+    if (byScryfallId[key]) {
+      byScryfallId[key].quantity += qty;
+    } else {
+      byScryfallId[key] = { name, quantity: qty };
+      if (scryfallId) {
+        byScryfallId[key].scryfall_id = scryfallId;
+      }
+    }
+  }
+  return Object.values(byScryfallId);
 }
 
 function updateCollectionUI() {

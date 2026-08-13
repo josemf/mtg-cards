@@ -287,12 +287,13 @@ app.get('/api/collection', (_req, res) => {
 });
 
 // POST /api/collection/import — import cards from resolved data
-// body: { mode: "replace" | "merge", cards: [{ name, quantity, set? }] }
-// Resolves names to oracle_ids, then stores in DB.
-// mode "replace" clears the table first; mode "merge" adds to existing quantities.
+// body: { mode: "replace" | "merge", cards: [{ name, quantity, scryfall_id?, set? }] }
+// Resolves names to oracle_ids (via Scryfall search or direct scryfall_id lookup),
+// then stores in DB. mode "replace" clears the table first; mode "merge" adds to
+// existing quantities.
 app.post('/api/collection/import', express.json(), async (req, res) => {
   try {
-    const { mode, cards } = req.body as { mode: 'replace' | 'merge'; cards: { name: string; quantity: number; set?: string }[] };
+    const { mode, cards } = req.body as { mode: 'replace' | 'merge'; cards: { name: string; quantity: number; scryfall_id?: string; set?: string }[] };
     if (!['replace', 'merge'].includes(mode)) {
       return res.status(400).json({ error: 'mode must be "replace" or "merge"' });
     }
@@ -300,38 +301,66 @@ app.post('/api/collection/import', express.json(), async (req, res) => {
       return res.status(400).json({ error: 'cards array is required and must not be empty' });
     }
 
-    // Resolve each card name to oracle_id via Scryfall
+    // Resolve each card to oracle_id via Scryfall
     const resolved: { oracle_id: string; name: string; quantity: number }[] = [];
     const errors: string[] = [];
 
     for (const entry of cards) {
       try {
-        let query = `!"${entry.name}"`;
-        if (entry.set) {
-          query += ` e:${entry.set}`;
-        }
-        const response = await fetch(
-          `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&unique=prints`,
-          { headers: SCRYFALL_HEADERS }
-        );
-        if (!response.ok) {
-          errors.push(`Could not resolve "${entry.name}"`);
-          continue;
-        }
-        const data = (await response.json()) as ScryfallResponse;
-        const oracleMap = new Map<string, { name: string; oracle_id: string }>();
-        for (const card of data.data) {
-          const oid = card.oracle_id || '';
-          if (oid && !oracleMap.has(oid)) {
-            oracleMap.set(oid, { name: card.name, oracle_id: oid });
+        let oracleId: string | null = null;
+        let cardName = entry.name;
+
+        if (entry.scryfall_id) {
+          // Direct scryfall_id lookup — faster and more reliable
+          const response = await fetch(
+            `https://api.scryfall.com/cards/${encodeURIComponent(entry.scryfall_id)}`,
+            { headers: SCRYFALL_HEADERS }
+          );
+          if (response.ok) {
+            const card = await response.json() as { oracle_id?: string; name?: string };
+            oracleId = card.oracle_id || null;
+            cardName = card.name || entry.name;
+            if (!oracleId) {
+              errors.push(`No oracle_id found for "${entry.name}"`);
+              continue;
+            }
+          } else {
+            errors.push(`Could not resolve scryfall_id "${entry.scryfall_id}" for "${entry.name}"`);
+            continue;
+          }
+        } else {
+          // Name-based search
+          let query = `!"${entry.name}"`;
+          if (entry.set) {
+            query += ` e:${entry.set}`;
+          }
+          const response = await fetch(
+            `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&unique=prints`,
+            { headers: SCRYFALL_HEADERS }
+          );
+          if (!response.ok) {
+            errors.push(`Could not resolve "${entry.name}"`);
+            continue;
+          }
+          const data = (await response.json()) as ScryfallResponse;
+          const oracleMap = new Map<string, { name: string; oracle_id: string }>();
+          for (const card of data.data) {
+            const oid = card.oracle_id || '';
+            if (oid && !oracleMap.has(oid)) {
+              oracleMap.set(oid, { name: card.name, oracle_id: oid });
+            }
+          }
+          const first = oracleMap.values().next().value;
+          if (first) {
+            oracleId = first.oracle_id;
+            cardName = first.name;
+          } else {
+            errors.push(`No oracle_id found for "${entry.name}"`);
+            continue;
           }
         }
-        const first = oracleMap.values().next().value;
-        if (first) {
-          resolved.push({ ...first, quantity: entry.quantity });
-        } else {
-          errors.push(`No oracle_id found for "${entry.name}"`);
-        }
+
+        resolved.push({ oracle_id: oracleId, name: cardName, quantity: entry.quantity });
       } catch {
         errors.push(`Error resolving "${entry.name}"`);
       }

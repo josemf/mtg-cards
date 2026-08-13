@@ -754,3 +754,48 @@ body {
     font-size: 0.825rem;
   }
 }
+/* Provider selector buttons */
+.provider-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.provider-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.provider-btn:hover {
+  border-color: var(--color-primary);
+  color: var(--color-text);
+}
+
+.provider-btn.selected {
+  background: color-mix(in srgb, var(--color-primary) 15%, var(--color-bg));
+  border-color: var(--color-primary);
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.provider-icon {
+  font-size: 1.1rem;
+}
+
+.provider-panel {
+  animation: fade-in 0.15s ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
