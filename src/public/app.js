@@ -681,18 +681,38 @@ async function importToServer(cards, mode) {
   }
 }
 
+// Parse a single CSV row handling quoted fields (commas inside quotes are preserved)
+function parseCsvRow(line) {
+  const cols = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+    } else if (ch === ',' && !inQuotes) {
+      cols.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  cols.push(current.trim());
+  return cols;
+}
+
 function parseMoxfieldCsv(text) {
   const lines = text.split('\n').filter(l => l.trim());
   if (lines.length < 2) return [];
 
-  const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const header = parseCsvRow(lines[0]).map(h => h.toLowerCase());
   const countIdx = header.indexOf('count');
   const nameIdx = header.indexOf('name');
   if (countIdx === -1 || nameIdx === -1) return [];
 
   const byName = {};
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(',').map(c => c.trim());
+    const cols = parseCsvRow(lines[i]);
     const name = cols[nameIdx];
     if (!name) continue;
     const qty = parseInt(cols[countIdx], 10) || 1;
@@ -711,7 +731,7 @@ function parseManaboxCsv(text) {
   const lines = text.split('\n').filter(l => l.trim());
   if (lines.length < 2) return [];
 
-  const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const header = parseCsvRow(lines[0]).map(h => h.toLowerCase());
   const qtyIdx = header.indexOf('quantity');
   const nameIdx = header.indexOf('name');
   const scryfallIdx = header.indexOf('scryfall id');
@@ -724,7 +744,7 @@ function parseManaboxCsv(text) {
 
   const byScryfallId = {};
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(',').map(c => c.trim());
+    const cols = parseCsvRow(lines[i]);
     const name = cols[nameCol];
     if (!name) continue;
     const qty = parseInt(cols[qtyCol], 10) || 1;

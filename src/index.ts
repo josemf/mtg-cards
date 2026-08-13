@@ -301,45 +301,107 @@ app.post('/api/collection/import', express.json({ limit: '50mb' }), async (req, 
       return res.status(400).json({ error: 'cards array is required and must not be empty' });
     }
 
-    // Resolve each card to oracle_id via Scryfall
+    // Resolve each card to oracle_id via Scryfall.
+    // Batches scryfall_id lookups via POST /cards/collection (up to 75 per call).
+    // Name-only cards are deduplicated and resolved one by one with a delay.
     const resolved: { oracle_id: string; name: string; quantity: number }[] = [];
     const errors: string[] = [];
 
-    for (const entry of cards) {
-      try {
-        let oracleId: string | null = null;
-        let cardName = entry.name;
+    // Split: cards with scryfall_id and cards without
+    const withIds: { id: string; name: string; quantity: number }[] = [];
+    const withoutIds: { name: string; quantity: number; set?: string }[] = [];
 
-        if (entry.scryfall_id) {
-          // Direct scryfall_id lookup — faster and more reliable
-          const response = await fetch(
-            `https://api.scryfall.com/cards/${encodeURIComponent(entry.scryfall_id)}`,
-            { headers: SCRYFALL_HEADERS }
-          );
+    for (const entry of cards) {
+      if (entry.scryfall_id) {
+        withIds.push({ id: entry.scryfall_id, name: entry.name, quantity: entry.quantity });
+      } else {
+        withoutIds.push({ name: entry.name, quantity: entry.quantity, set: entry.set });
+      }
+    }
+
+    // Helper: process a chunk of /cards/collection responses
+    async function resolveBatch(identifiers: { id: string; name: string; quantity: number }[]) {
+      // Deduplicate by scryfall_id, summing quantities
+      const byId = new Map<string, { name: string; quantity: number }>();
+      for (const e of identifiers) {
+        const existing = byId.get(e.id);
+        if (existing) {
+          existing.quantity += e.quantity;
+        } else {
+          byId.set(e.id, { name: e.name, quantity: e.quantity });
+        }
+      }
+      const uniqueIds = Array.from(byId.entries());
+
+      // Batch in chunks of 75 (Scryfall limit)
+      for (let i = 0; i < uniqueIds.length; i += 75) {
+        const chunk = uniqueIds.slice(i, i + 75);
+        const payload = { identifiers: chunk.map(([id]) => ({ id })) };
+        try {
+          const response = await fetch('https://api.scryfall.com/cards/collection', {
+            method: 'POST',
+            headers: { ...SCRYFALL_HEADERS, 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
           if (response.ok) {
-            const card = await response.json() as { oracle_id?: string; name?: string };
-            oracleId = card.oracle_id || null;
-            cardName = card.name || entry.name;
-            if (!oracleId) {
-              errors.push(`No oracle_id found for "${entry.name}"`);
-              continue;
+            const data = await response.json() as { data: { id: string; oracle_id: string; name: string }[] };
+            const idMap = new Map(data.data.map(c => [c.id, { oracle_id: c.oracle_id, name: c.name }]));
+            for (const [id, { name, quantity }] of chunk) {
+              const match = idMap.get(id);
+              if (match) {
+                resolved.push({ oracle_id: match.oracle_id, name: match.name, quantity });
+              } else {
+                errors.push(`Scryfall returned no data for id "${id}" ("${name}")`);
+              }
             }
           } else {
-            errors.push(`Could not resolve scryfall_id "${entry.scryfall_id}" for "${entry.name}"`);
-            continue;
+            for (const [, { name }] of chunk) {
+              errors.push(`Could not resolve scryfall_id for "${name}" (batch request failed)`);
+            }
           }
+        } catch {
+          for (const [, { name }] of chunk) {
+            errors.push(`Error resolving scryfall_id for "${name}"`);
+          }
+        }
+        // Small delay to avoid rate limiting
+        if (i + 75 < uniqueIds.length) await new Promise(r => setTimeout(r, 200));
+      }
+    }
+
+    // Batch all scryfall_id lookups together
+    await resolveBatch(withIds);
+
+    // Resolve name-only cards, deduplicated by lowercase name
+    if (withoutIds.length > 0) {
+      const byName = new Map<string, { quantity: number; set?: string }>();
+      for (const e of withoutIds) {
+        const key = e.name.toLowerCase();
+        const existing = byName.get(key);
+        if (existing) {
+          existing.quantity += e.quantity;
         } else {
-          // Name-based search
-          let query = `!"${entry.name}"`;
-          if (entry.set) {
-            query += ` e:${entry.set}`;
+          byName.set(key, { quantity: e.quantity, set: e.set });
+        }
+      }
+
+      let idx = 0;
+      for (const [lcName, { quantity, set }] of byName) {
+        // Simple rate limiting: delay after every 10 requests
+        if (idx > 0 && idx % 10 === 0) await new Promise(r => setTimeout(r, 200));
+        idx++;
+
+        try {
+          let query = `!"${lcName}"`;
+          if (set) {
+            query += ` e:${set}`;
           }
           const response = await fetch(
             `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&unique=prints`,
             { headers: SCRYFALL_HEADERS }
           );
           if (!response.ok) {
-            errors.push(`Could not resolve "${entry.name}"`);
+            errors.push(`Could not resolve "${lcName}"`);
             continue;
           }
           const data = (await response.json()) as ScryfallResponse;
@@ -352,17 +414,13 @@ app.post('/api/collection/import', express.json({ limit: '50mb' }), async (req, 
           }
           const first = oracleMap.values().next().value;
           if (first) {
-            oracleId = first.oracle_id;
-            cardName = first.name;
+            resolved.push({ oracle_id: first.oracle_id, name: first.name, quantity });
           } else {
-            errors.push(`No oracle_id found for "${entry.name}"`);
-            continue;
+            errors.push(`No oracle_id found for "${lcName}"`);
           }
+        } catch {
+          errors.push(`Error resolving "${lcName}"`);
         }
-
-        resolved.push({ oracle_id: oracleId, name: cardName, quantity: entry.quantity });
-      } catch {
-        errors.push(`Error resolving "${entry.name}"`);
       }
     }
 
