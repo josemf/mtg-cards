@@ -58,6 +58,7 @@ const collectionClearBtn = document.getElementById('collection-clear-btn');
 const collectionStatus = document.getElementById('collection-status');
 const collectionStats = document.getElementById('collection-stats');
 const collectionStatsRow = document.getElementById('collection-stats-row');
+const collectionOnlyToggle = document.getElementById('collection-only-toggle');
 // Provider system
 const providerBtns = document.querySelectorAll('.provider-btn');
 const providerPanels = {
@@ -92,6 +93,11 @@ modalClose.addEventListener('click', closeModal);
 filterToggle.addEventListener('click', () => {
   filterPanel.classList.toggle('hidden');
   filterToggle.classList.toggle('active');
+});
+
+// Collection-only toggle — re-filter on change
+collectionOnlyToggle.addEventListener('change', () => {
+  if (currentQuery) performSearch(1);
 });
 
 // Color button toggles
@@ -331,10 +337,21 @@ async function performSearch(page) {
 
     totalCards = data.total_cards || 0;
     totalPages = data.total_pages || 1;
-    const cards = data.data || [];
+    let cards = data.data || [];
+
+    // Filter by local collection when "Collection only" is checked
+    const collectionOnly = collectionOnlyToggle && collectionOnlyToggle.checked;
+    if (collectionOnly && cards.length > 0) {
+      cards = cards.filter(c => c.oracle_id && collection[c.oracle_id] > 0);
+      // Adjust total to match filtered count (approximate — we only see the current page)
+      totalCards = cards.length;
+      totalPages = 1;
+    }
 
     if (cards.length === 0) {
-      throw new Error('No cards found. Try a different search.');
+      throw new Error(collectionOnly
+        ? 'No cards from your collection match this search. Try a different search or uncheck "Collection only".'
+        : 'No cards found. Try a different search.');
     }
 
     renderCards(cards);
@@ -429,10 +446,13 @@ function renderPagination() {
 function renderResultsInfo() {
   if (totalCards > 0) {
     resultsInfo.classList.remove('hidden');
-    totalCardsEl.textContent = `📊 ${totalCards} cards found`;
+    const collectionOnly = collectionOnlyToggle && collectionOnlyToggle.checked;
+    totalCardsEl.textContent = collectionOnly
+      ? `📊 ${totalCards} owned card${totalCards === 1 ? '' : 's'} found`
+      : `📊 ${totalCards} cards found`;
     const start = (currentPage - 1) * PAGE_SIZE + 1;
     const end = Math.min(currentPage * PAGE_SIZE, totalCards);
-    currentPageInfo.textContent = `Showing ${start}–${end}`;
+    currentPageInfo.textContent = `Showing ${start}–${end}${collectionOnly ? ' (collection only)' : ''}`;
 
     // Show active filters summary
     const summary = getFilterSummary();
