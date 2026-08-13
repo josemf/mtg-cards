@@ -1,5 +1,35 @@
 import express from 'express';
 import path from 'path';
+import { DatabaseSync } from 'node:sqlite';
+
+// ── SQLite collection store ──────────────────────────────────────────────────
+const DB_PATH = path.join(__dirname, '..', 'collection.db');
+const db = new DatabaseSync(DB_PATH);
+db.exec(`CREATE TABLE IF NOT EXISTS cards (
+  oracle_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  quantity INTEGER NOT NULL DEFAULT 1
+)`);
+
+// Prepared statements — cached for reuse across requests
+const stmtGetAll = db.prepare('SELECT oracle_id, name, quantity FROM cards ORDER BY name');
+const stmtUpsert = db.prepare('INSERT INTO cards (oracle_id, name, quantity) VALUES (?, ?, ?) ON CONFLICT(oracle_id) DO UPDATE SET quantity = quantity + excluded.quantity');
+const stmtReplace = db.prepare('INSERT OR REPLACE INTO cards (oracle_id, name, quantity) VALUES (?, ?, ?)');
+const stmtClear = db.prepare('DELETE FROM cards');
+const stmtDelete = db.prepare('DELETE FROM cards WHERE oracle_id = ?');
+
+// Run DB operations inside a transaction helper
+function transaction<T>(fn: () => T): T {
+  db.exec('BEGIN');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
 
 interface ScryfallCard {
   id: string;
@@ -243,199 +273,62 @@ app.get('/api/cards/:id/versions', async (req, res) => {
   }
 });
 
-// API endpoint: sync Moxfield collection using API key
-// Accepts { username, apiKey } and proxies authenticated requests to Moxfield's API
-app.post('/api/moxfield/sync', express.json(), async (req, res) => {
+// ── Collection API ────────────────────────────────────────────────────────────
+
+// GET /api/collection — return all cards from the SQLite database
+app.get('/api/collection', (_req, res) => {
   try {
-    const { username, apiKey } = req.body;
-    if (!username || !apiKey) {
-      return res.status(400).json({ error: 'Username and API key are required' });
-    }
-
-    const authHeaders = {
-      'Accept': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-      'User-Agent': 'MTGCardsApp/1.0',
-    };
-
-    // Step 1: Fetch the user's collections
-    const collectionsRes = await fetch(
-      `https://api.moxfield.com/v2/users/${encodeURIComponent(username)}/collections`,
-      { headers: authHeaders }
-    );
-
-    if (collectionsRes.status === 401 || collectionsRes.status === 403) {
-      return res.status(401).json({ error: 'Invalid API key or unauthorized. Check your Moxfield API key.' });
-    }
-
-    if (collectionsRes.status === 404) {
-      return res.status(404).json({ error: `Moxfield user "${username}" not found` });
-    }
-
-    if (!collectionsRes.ok) {
-      const text = await collectionsRes.text();
-      // Check if it's a Cloudflare block
-      if (text.includes('Cloudflare') || text.includes('Attention Required')) {
-        return res.status(502).json({ error: 'Moxfield API is behind Cloudflare and cannot be reached from this server. Try using the Import feature instead.' });
-      }
-      return res.status(collectionsRes.status).json({ error: `Moxfield API error: ${collectionsRes.status}` });
-    }
-
-    let collectionsData: any;
-    try {
-      collectionsData = await collectionsRes.json();
-    } catch {
-      return res.status(502).json({ error: 'Moxfield returned unexpected data (possibly a Cloudflare block). Try using the Import feature instead.' });
-    }
-
-    // collectionsData could be an array of collections or an object with collections
-    const collections = Array.isArray(collectionsData) ? collectionsData : (collectionsData.collections || collectionsData.data || []);
-
-    if (collections.length === 0) {
-      return res.json({ username, cards: [], note: 'No collections found for this user.' });
-    }
-
-    // Step 2: Fetch cards from each collection
-    const allCards: Record<string, { name: string; oracle_id: string; quantity: number }> = {};
-    let totalCards = 0;
-    const collectionNames: string[] = [];
-
-    for (const collection of collections) {
-      const collId = collection.id || collection.publicId;
-      const collName = collection.name || collection.displayName || 'Unknown';
-      collectionNames.push(collName);
-
-      if (!collId) continue;
-
-      // Fetch cards page by page
-      let page = 1;
-      let hasMore = true;
-      while (hasMore) {
-        const cardsRes = await fetch(
-          `https://api.moxfield.com/v2/collections/${encodeURIComponent(collId)}/cards?page=${page}&pageSize=100`,
-          { headers: authHeaders }
-        );
-
-        if (!cardsRes.ok) break;
-
-        let cardsData: any;
-        try {
-          cardsData = await cardsRes.json();
-        } catch {
-          break;
-        }
-
-        const cardEntries = cardsData.data || cardsData.cards || cardsData;
-        for (const entry of cardEntries) {
-          const cardName = entry.name || entry.card?.name;
-          const oracleId = entry.oracleId || entry.oracle_id || entry.card?.oracle_id || entry.card?.oracleId;
-          const qty = entry.quantity || entry.count || 1;
-
-          if (cardName && oracleId) {
-            const key = oracleId;
-            if (allCards[key]) {
-              allCards[key].quantity += qty;
-            } else {
-              allCards[key] = { name: cardName, oracle_id: oracleId, quantity: qty };
-            }
-            totalCards += qty;
-          }
-        }
-
-        hasMore = Boolean(cardsData.hasMore || cardsData.has_more);
-        page++;
-      }
-    }
-
-    const cards = Object.values(allCards);
-
-    res.json({
-      username,
-      collections: collectionNames,
-      cards,
-      totalCards,
-    });
+    const cards = stmtGetAll.all() as { oracle_id: string; name: string; quantity: number }[];
+    res.json({ cards });
   } catch (error) {
-    console.error('Error syncing Moxfield collection:', error);
-    res.status(500).json({ error: 'Failed to sync Moxfield collection. The API may be blocked by Cloudflare.' });
+    console.error('Error reading collection:', error);
+    res.status(500).json({ error: 'Failed to read collection' });
   }
 });
 
-// API endpoint: proxy to Moxfield public API to fetch a user's profile
-app.get('/api/collection/:username', async (req, res) => {
+// POST /api/collection/import — import cards from resolved data
+// body: { mode: "replace" | "merge", cards: [{ name, quantity, set? }] }
+// Resolves names to oracle_ids, then stores in DB.
+// mode "replace" clears the table first; mode "merge" adds to existing quantities.
+app.post('/api/collection/import', express.json(), async (req, res) => {
   try {
-    const { username } = req.params;
-
-    const profileRes = await fetch(`https://api.moxfield.com/v2/users/${encodeURIComponent(username)}`, {
-      headers: { 'Accept': 'application/json' },
-    });
-
-    if (!profileRes.ok) {
-      if (profileRes.status === 404) {
-        return res.status(404).json({ error: `Moxfield user "${username}" not found` });
-      }
-      return res.status(profileRes.status).json({ error: 'Failed to fetch Moxfield profile' });
+    const { mode, cards } = req.body as { mode: 'replace' | 'merge'; cards: { name: string; quantity: number; set?: string }[] };
+    if (!['replace', 'merge'].includes(mode)) {
+      return res.status(400).json({ error: 'mode must be "replace" or "merge"' });
+    }
+    if (!Array.isArray(cards) || cards.length === 0) {
+      return res.status(400).json({ error: 'cards array is required and must not be empty' });
     }
 
-    res.json({
-      username,
-      found: true,
-      note: 'Profile found. To sync your collection, enter your Moxfield API key below.',
-      public_url: `https://www.moxfield.com/users/${username}`,
-    });
-  } catch (error) {
-    console.error('Error fetching Moxfield collection:', error);
-    res.status(500).json({ error: 'Failed to fetch Moxfield collection' });
-  }
-});
-
-// API endpoint: resolve a list of card names to Scryfall oracle_ids
-app.post('/api/resolve-cards', express.json(), async (req, res) => {
-  try {
-    const { cards } = req.body as { cards: { name: string; quantity: number; set?: string }[] };
-    if (!Array.isArray(cards)) {
-      return res.status(400).json({ error: 'Invalid cards array' });
-    }
-
-    const resolved: ResolvedCard[] = [];
+    // Resolve each card name to oracle_id via Scryfall
+    const resolved: { oracle_id: string; name: string; quantity: number }[] = [];
     const errors: string[] = [];
 
     for (const entry of cards) {
       try {
-        // Build search query — exact match with optional set filter
         let query = `!"${entry.name}"`;
         if (entry.set) {
           query += ` e:${entry.set}`;
         }
-
         const response = await fetch(
           `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&unique=prints`,
           { headers: SCRYFALL_HEADERS }
         );
-
         if (!response.ok) {
           errors.push(`Could not resolve "${entry.name}"`);
           continue;
         }
-
         const data = (await response.json()) as ScryfallResponse;
-        // Get unique oracle_ids and their printings
-        const oracleMap = new Map<string, { name: string; oracle_id: string; set_name: string; set_code: string }>();
+        const oracleMap = new Map<string, { name: string; oracle_id: string }>();
         for (const card of data.data) {
           const oid = card.oracle_id || '';
           if (oid && !oracleMap.has(oid)) {
-            oracleMap.set(oid, {
-              name: card.name,
-              oracle_id: oid,
-              set_name: card.set_name || '',
-              set_code: card.set_code || '',
-            });
+            oracleMap.set(oid, { name: card.name, oracle_id: oid });
           }
         }
-        // Pick the first (primary) printing
-        const firstEntry = oracleMap.values().next().value;
-        if (firstEntry) {
-          resolved.push({ ...firstEntry, quantity: entry.quantity });
+        const first = oracleMap.values().next().value;
+        if (first) {
+          resolved.push({ ...first, quantity: entry.quantity });
         } else {
           errors.push(`No oracle_id found for "${entry.name}"`);
         }
@@ -444,28 +337,51 @@ app.post('/api/resolve-cards', express.json(), async (req, res) => {
       }
     }
 
-    res.json({ resolved, errors });
+    // Write to DB in a transaction
+    transaction(() => {
+      if (mode === 'replace') {
+        stmtClear.run();
+        for (const card of resolved) {
+          stmtReplace.run(card.oracle_id, card.name, card.quantity);
+        }
+      } else {
+        for (const card of resolved) {
+          stmtUpsert.run(card.oracle_id, card.name, card.quantity);
+        }
+      }
+    });
+
+    const total = resolved.reduce((s, c) => s + c.quantity, 0);
+    res.json({ imported: resolved.length, totalCards: total, errors });
   } catch (error) {
-    console.error('Error resolving cards:', error);
-    res.status(500).json({ error: 'Failed to resolve cards' });
+    console.error('Error importing collection:', error);
+    res.status(500).json({ error: 'Failed to import collection' });
   }
 });
 
-interface MoxfieldCardEntry {
-  name: string;
-  oracle_id: string;
-  quantity: number;
-  set_name?: string;
-  set_code?: string;
-}
+// POST /api/collection/clear — delete all cards from the collection
+app.post('/api/collection/clear', (_req, res) => {
+  try {
+    stmtClear.run();
+    res.json({ cleared: true });
+  } catch (error) {
+    console.error('Error clearing collection:', error);
+    res.status(500).json({ error: 'Failed to clear collection' });
+  }
+});
 
-interface ResolvedCard {
-  name: string;
-  oracle_id: string;
-  quantity: number;
-  set_name: string;
-  set_code: string;
-}
+// POST /api/collection/delete — delete a single card by oracle_id
+app.post('/api/collection/delete', express.json(), (req, res) => {
+  try {
+    const { oracle_id } = req.body as { oracle_id: string };
+    if (!oracle_id) return res.status(400).json({ error: 'oracle_id required' });
+    stmtDelete.run(oracle_id);
+    res.json({ deleted: true });
+  } catch (error) {
+    console.error('Error deleting card:', error);
+    res.status(500).json({ error: 'Failed to delete card' });
+  }
+});
 
 // Fallback: serve index.html for all other routes
 app.get('/{*path}', (_req, res) => {

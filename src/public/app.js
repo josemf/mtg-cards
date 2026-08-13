@@ -53,13 +53,12 @@ const modalBody = document.getElementById('modal-body');
 // Collection elements
 const collectionToggle = document.getElementById('collection-toggle');
 const collectionPanel = document.getElementById('collection-panel');
-const moxfieldUsername = document.getElementById('moxfield-username');
-const moxfieldFetchBtn = document.getElementById('moxfield-fetch-btn');
-const moxfieldApiKey = document.getElementById('moxfield-apikey');
-const moxfieldSyncBtn = document.getElementById('moxfield-sync-btn');
+const csvFileInput = document.getElementById('csv-file-input');
+const csvImportBtn = document.getElementById('csv-import-btn');
 const collectionImport = document.getElementById('collection-import');
 const collectionImportBtn = document.getElementById('collection-import-btn');
 const collectionClearBtn = document.getElementById('collection-clear-btn');
+const collectionReplaceChk = document.getElementById('collection-replace-chk');
 const collectionStatus = document.getElementById('collection-status');
 const collectionStats = document.getElementById('collection-stats');
 const collectionStatsRow = document.getElementById('collection-stats-row');
@@ -111,7 +110,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeModal();
 });
 
-// Load collection from localStorage on startup
+// Load collection from server on startup
 loadCollection();
 
 // Collection panel toggle
@@ -120,82 +119,21 @@ collectionToggle.addEventListener('click', () => {
   collectionToggle.classList.toggle('active');
 });
 
-// Moxfield username fetch
-moxfieldFetchBtn.addEventListener('click', async () => {
-  const username = moxfieldUsername.value.trim();
-  if (!username) {
-    setCollectionStatus('Please enter a Moxfield username', 'error');
+// CSV file import — parse, send to server with mode "replace"
+csvImportBtn.addEventListener('click', async () => {
+  const file = csvFileInput.files[0];
+  if (!file) {
+    setCollectionStatus('Select a CSV file first', 'error');
     return;
   }
-  setCollectionStatus('Verifying Moxfield profile...', '');
-  try {
-    const res = await fetch(`/api/collection/${encodeURIComponent(username)}`);
-    const data = await res.json();
-    if (!res.ok) {
-      setCollectionStatus(data.error || 'Failed to load', 'error');
-      return;
-    }
-    if (data.public_url) {
-      setCollectionStatus(`Profile found: ${data.public_url}. Now enter your API key and click Sync.`, 'muted');
-    }
-  } catch (err) {
-    setCollectionStatus('Error connecting to server', 'error');
-  }
-});
-
-// Moxfield API key sync
-moxfieldSyncBtn.addEventListener('click', async () => {
-  const username = moxfieldUsername.value.trim();
-  const apiKey = moxfieldApiKey.value.trim();
-  if (!username) {
-    setCollectionStatus('Enter your Moxfield username first', 'error');
+  const text = await file.text();
+  const cards = parseCsvText(text);
+  if (cards.length === 0) {
+    setCollectionStatus('No cards found in CSV', 'error');
     return;
   }
-  if (!apiKey) {
-    setCollectionStatus('Enter your Moxfield API key', 'error');
-    return;
-  }
-  setCollectionStatus('Syncing collection from Moxfield...', '');
-  try {
-    const res = await fetch('/api/moxfield/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, apiKey }),
-    });
-    const data = await res.json();
-
-    if (!res.ok) {
-      setCollectionStatus(data.error || 'Sync failed', 'error');
-      return;
-    }
-
-    // Merge synced cards into collection
-    if (data.cards && data.cards.length > 0) {
-      let added = 0;
-      for (const card of data.cards) {
-        const key = card.oracle_id;
-        const current = collection[key] || 0;
-        collection[key] = current + card.quantity;
-        added += card.quantity;
-      }
-
-      collectionCount = Object.values(collection).reduce((sum, qty) => sum + (Number(qty) || 0), 0);
-      saveCollection();
-      updateCollectionUI();
-
-      const collNames = data.collections ? data.collections.join(', ') : '';
-      setCollectionStatus(`✅ Synced ${added} cards from ${data.totalCards} total${collNames ? ' (' + collNames + ')' : ''}`, '');
-
-      refreshOwnedBadges();
-      if (!cardModal.classList.contains('hidden') && currentCardId) {
-        refreshModalOwned();
-      }
-    } else {
-      setCollectionStatus(data.note || 'No cards found in collection', 'muted');
-    }
-  } catch (err) {
-    setCollectionStatus('Error syncing collection', 'error');
-  }
+  setCollectionStatus(`Importing ${cards.length} cards from CSV...`, '');
+  await importToServer(cards, 'replace');
 });
 
 // Import collection from textarea
@@ -205,31 +143,33 @@ collectionImportBtn.addEventListener('click', () => {
     setCollectionStatus('Paste your cards first', 'error');
     return;
   }
-  importCollection(text);
+  const cards = parseCollectionText(text);
+  if (cards.length === 0) {
+    setCollectionStatus('No cards found to import', 'error');
+    return;
+  }
+  const mode = collectionReplaceChk.checked ? 'replace' : 'merge';
+  importToServer(cards, mode);
 });
 
 // Clear collection
-collectionClearBtn.addEventListener('click', () => {
+collectionClearBtn.addEventListener('click', async () => {
   if (collectionCount === 0) return;
   if (!confirm('Clear your entire collection?')) return;
-  collection = {};
-  collectionCount = 0;
-  collectionImport.value = '';
-  saveCollection();
-  updateCollectionUI();
-  setCollectionStatus('Collection cleared', '');
-  // Refresh card display if there are cards showing
-  const cards = document.querySelectorAll('.card-item');
-  if (cards.length > 0) {
-    cards.forEach(el => {
-      const badge = el.querySelector('.owned-badge');
-      if (badge) badge.remove();
-    });
-  }
-  // Refresh modal if open
-  if (!cardModal.classList.contains('hidden') && currentCardId) {
-    const modalOwned = document.querySelector('.modal-owned-info');
-    if (modalOwned) modalOwned.remove();
+  try {
+    const res = await fetch('/api/collection/clear', { method: 'POST' });
+    if (!res.ok) throw new Error('clear failed');
+    collection = {};
+    collectionCount = 0;
+    collectionImport.value = '';
+    updateCollectionUI();
+    setCollectionStatus('Collection cleared', '');
+    refreshOwnedBadges();
+    if (!cardModal.classList.contains('hidden') && currentCardId) {
+      refreshModalOwned();
+    }
+  } catch (err) {
+    setCollectionStatus('Error clearing collection', 'error');
   }
 });
 
@@ -635,33 +575,82 @@ function escapeHtml(str) {
 
 // ====== COLLECTION FUNCTIONS ======
 
-function loadCollection() {
+async function loadCollection() {
   try {
-    const saved = localStorage.getItem('mtg_collection');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      // Support both old format (object) and new format
-      if (parsed.cards && typeof parsed.cards === 'object') {
-        collection = parsed.cards;
-      } else if (typeof parsed === 'object') {
-        collection = parsed;
-      }
-      collectionCount = Object.values(collection).reduce((sum, qty) => sum + (Number(qty) || 0), 0);
-      updateCollectionUI();
+    const res = await fetch('/api/collection');
+    if (!res.ok) throw new Error('fetch failed');
+    const data = await res.json();
+    collection = {};
+    collectionCount = 0;
+    for (const card of data.cards) {
+      collection[card.oracle_id] = card.quantity;
+      collectionCount += card.quantity;
     }
+    updateCollectionUI();
   } catch (e) {
-    // Corrupted data, ignore
+    // Server unreachable — start empty
     collection = {};
     collectionCount = 0;
   }
 }
 
-function saveCollection() {
+async function importToServer(cards, mode) {
+  setCollectionStatus(`Resolving ${cards.length} cards...`, '');
   try {
-    localStorage.setItem('mtg_collection', JSON.stringify(collection));
-  } catch (e) {
-    // localStorage full or unavailable
+    const res = await fetch('/api/collection/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, cards }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setCollectionStatus(data.error || 'Import failed', 'error');
+      return;
+    }
+    // Reload collection from server to get resolved state
+    await loadCollection();
+    let msg = `✅ Imported ${data.totalCards} card${data.totalCards !== 1 ? 's' : ''}`;
+    if (data.errors && data.errors.length > 0) {
+      msg += `. ${data.errors.length} card${data.errors.length !== 1 ? 's' : ''} could not be resolved`;
+    }
+    setCollectionStatus(msg, '');
+    refreshOwnedBadges();
+    if (!cardModal.classList.contains('hidden') && currentCardId) {
+      refreshModalOwned();
+    }
+  } catch (err) {
+    setCollectionStatus('Error importing collection', 'error');
   }
+}
+
+function parseCsvText(text) {
+  const lines = text.split('\n').filter(l => l.trim());
+  if (lines.length < 2) return [];
+
+  // Parse header row — find column indices
+  const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const countIdx = header.indexOf('count');
+  const nameIdx = header.indexOf('name');
+  if (countIdx === -1 || nameIdx === -1) return [];
+
+  // Parse data rows, aggregate by name. If the card name is repeated (different
+  // editions / conditions / finishes), sum the quantities together.
+  const byName = {};
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(',').map(c => c.trim());
+    const name = cols[nameIdx];
+    if (!name) continue;
+    const qty = parseInt(cols[countIdx], 10) || 1;
+    const key = name.toLowerCase();
+    if (byName[key]) {
+      byName[key].quantity += qty;
+    } else {
+      // Don't pass set code — Moxfield's edition codes don't always match
+      // Scryfall's. Exact name matching is more reliable.
+      byName[key] = { name, quantity: qty, set: '' };
+    }
+  }
+  return Object.values(byName);
 }
 
 function updateCollectionUI() {
@@ -714,59 +703,6 @@ function parseCollectionText(text) {
   }
 
   return entries;
-}
-
-async function importCollection(text) {
-  const entries = parseCollectionText(text);
-  if (entries.length === 0) {
-    setCollectionStatus('No cards found to import', 'error');
-    return;
-  }
-
-  setCollectionStatus(`Resolving ${entries.length} cards...`, '');
-
-  try {
-    const res = await fetch('/api/resolve-cards', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cards: entries }),
-    });
-    const data = await res.json();
-
-    if (!res.ok) {
-      setCollectionStatus(data.error || 'Failed to resolve cards', 'error');
-      return;
-    }
-
-    // Merge resolved cards into collection
-    let added = 0;
-    for (const card of data.resolved) {
-      const key = card.oracle_id;
-      const current = collection[key] || 0;
-      collection[key] = current + card.quantity;
-      added += card.quantity;
-    }
-
-    collectionCount = Object.values(collection).reduce((sum, qty) => sum + (Number(qty) || 0), 0);
-    saveCollection();
-    updateCollectionUI();
-
-    let msg = `✅ Imported ${added} card${added !== 1 ? 's' : ''}`;
-    if (data.errors && data.errors.length > 0) {
-      msg += `. ${data.errors.length} card${data.errors.length !== 1 ? 's' : ''} could not be resolved`;
-    }
-    setCollectionStatus(msg, '');
-
-    // Refresh owned badges on current grid
-    refreshOwnedBadges();
-
-    // Refresh modal if open
-    if (!cardModal.classList.contains('hidden') && currentCardId) {
-      refreshModalOwned();
-    }
-  } catch (err) {
-    setCollectionStatus('Error importing collection', 'error');
-  }
 }
 
 // Check if an oracle_id is owned; returns quantity
