@@ -31,21 +31,24 @@
   <div id="collection-panel" class="filter-panel hidden">
     <div class="filter-row">
       <div class="filter-group" style="flex:1;">
-        <label class="filter-label">Moxfield Username</label>
-        <div style="display:flex;gap:0.5rem;">
-          <input type="text" id="moxfield-username" class="filter-input" placeholder="Enter Moxfield username..." style="flex:1;min-width:200px;">
-          <button id="moxfield-fetch-btn" class="search-button">Verify</button>
+        <label class="filter-label">Import from CSV</label>
+        <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+          <input type="file" id="csv-file-input" accept=".csv" style="flex:1;min-width:200px;font-size:0.85rem;">
+          <button id="csv-import-btn" class="search-button">Import CSV</button>
         </div>
-        <span style="font-size:0.75rem;color:var(--color-text-muted);">Verifies your Moxfield profile exists.</span>
+        <span style="font-size:0.75rem;color:var(--color-text-muted);">Moxfield CSV export format: Count, Name, Edition, etc.</span>
       </div>
     </div>
     <div class="filter-row">
       <div class="filter-group" style="flex:1;">
-        <label class="filter-label">Or Import Manually</label>
+        <label class="filter-label">Or Paste Manually</label>
         <textarea id="collection-import" class="filter-input" style="width:100%;min-height:100px;resize:vertical;font-family:monospace;font-size:0.8rem;" placeholder="Paste your cards here, one per line. Formats:&#10;4 Llanowar Elves&#10;3x Counterspell (FND)&#10;2 Llanowar Elves (Foundations) #123&#10;1 Card Name (SET)"></textarea>
         <div style="display:flex;gap:0.5rem;margin-top:0.5rem;align-items:center;flex-wrap:wrap;">
           <button id="collection-import-btn" class="search-button">Import</button>
           <button id="collection-clear-btn" class="clear-button">Clear Collection</button>
+          <label style="display:inline-flex;align-items:center;gap:0.4rem;font-size:0.8rem;color:var(--color-text-muted);">
+            <input type="checkbox" id="collection-replace-chk"> Replace existing
+          </label>
           <span id="collection-status" style="font-size:0.8rem;color:var(--color-text-muted);"></span>
         </div>
       </div>
