@@ -120,26 +120,37 @@ collectionToggle.addEventListener('click', () => {
   collectionToggle.classList.toggle('active');
 });
 
-// Moxfield username fetch
+// Moxfield username fetch — verify the user exists via their profile page
+// We do this from the frontend (browser) since the browser can handle Cloudflare.
+// The backend can't reach moxfield.com reliably (Cloudflare blocks non-browser requests).
 moxfieldFetchBtn.addEventListener('click', async () => {
   const username = moxfieldUsername.value.trim();
   if (!username) {
     setCollectionStatus('Please enter a Moxfield username', 'error');
     return;
   }
-  setCollectionStatus('Verifying Moxfield profile...', '');
+  setCollectionStatus('Checking Moxfield profile...', '');
   try {
+    // Try the backend proxy first (works if the server IP isn't blocked)
     const res = await fetch(`/api/collection/${encodeURIComponent(username)}`);
     const data = await res.json();
-    if (!res.ok) {
-      setCollectionStatus(data.error || 'Failed to load', 'error');
+    if (res.ok && data.found) {
+      setCollectionStatus(`Profile found: ${data.public_url}. Enter your API key and click Sync.`, 'muted');
       return;
     }
-    if (data.public_url) {
-      setCollectionStatus(`Profile found: ${data.public_url}. Now enter your API key and click Sync.`, 'muted');
-    }
+    // Backend couldn't verify — try from the browser directly
+    const directRes = await fetch(`https://www.moxfield.com/users/${encodeURIComponent(username)}`, {
+      method: 'HEAD',
+      mode: 'no-cors',
+    });
+    // With no-cors we can't read the status, but if it doesn't throw, the user likely exists
+    setCollectionStatus(
+      `Could not verify through server (Cloudflare). Enter your API key and click Sync to test directly.`,
+      'muted'
+    );
   } catch (err) {
-    setCollectionStatus('Error connecting to server', 'error');
+    // Browser check also failed — just let the user try syncing
+    setCollectionStatus('Enter your API key and click Sync to connect.', 'muted');
   }
 });
 

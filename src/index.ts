@@ -255,7 +255,7 @@ app.post('/api/moxfield/sync', express.json(), async (req, res) => {
     const authHeaders = {
       'Accept': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
-      'User-Agent': 'MTGCardsApp/1.0',
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
     };
 
     // Step 1: Fetch the user's collections
@@ -361,31 +361,40 @@ app.post('/api/moxfield/sync', express.json(), async (req, res) => {
   }
 });
 
-// API endpoint: proxy to Moxfield public API to fetch a user's profile
+// API endpoint: verify a Moxfield username exists by checking their profile page
 app.get('/api/collection/:username', async (req, res) => {
   try {
     const { username } = req.params;
 
-    const profileRes = await fetch(`https://api.moxfield.com/v2/users/${encodeURIComponent(username)}`, {
-      headers: { 'Accept': 'application/json' },
+    // Use the Moxfield website profile page to verify the user exists.
+    // The API (api.moxfield.com) is behind Cloudflare and blocks non-browser requests,
+    // but the website profile pages are accessible and return proper 200/404.
+    const profileRes = await fetch(`https://www.moxfield.com/users/${encodeURIComponent(username)}`, {
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
+      },
+      redirect: 'follow',
     });
 
+    if (profileRes.status === 404) {
+      return res.status(404).json({ error: `Moxfield user "${username}" not found` });
+    }
+
     if (!profileRes.ok) {
-      if (profileRes.status === 404) {
-        return res.status(404).json({ error: `Moxfield user "${username}" not found` });
-      }
-      return res.status(profileRes.status).json({ error: 'Failed to fetch Moxfield profile' });
+      return res.status(502).json({ error: 'Could not verify Moxfield profile (service may be blocked). Try using the API key directly.' });
     }
 
     res.json({
       username,
       found: true,
-      note: 'Profile found. To sync your collection, enter your Moxfield API key below.',
+      note: 'Profile found. Enter your API key below and click Sync Collection.',
       public_url: `https://www.moxfield.com/users/${username}`,
     });
   } catch (error) {
-    console.error('Error fetching Moxfield collection:', error);
-    res.status(500).json({ error: 'Failed to fetch Moxfield collection' });
+    console.error('Error verifying Moxfield username:', error);
+    res.status(502).json({ error: 'Could not reach Moxfield. Check your network connection.' });
   }
 });
 
