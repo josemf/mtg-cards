@@ -624,6 +624,15 @@ app.get('/api/collection/import/status/:jobId', (req, res) => {
   res.json(job);
 });
 
+// Parse a comparison string like ">=3", "<=5", ">2", "<4", or "3" into {op, val}
+function parseComparison(s: string): { op: string; val: number } {
+  const match = s.match(/^([><]=?)(.+)$/);
+  if (match) {
+    return { op: match[1], val: parseFloat(match[2]) };
+  }
+  return { op: '=', val: parseFloat(s) };
+}
+
 // ── Local collection search ──────────────────────────────────────────────────
 // Searches card_cache (full Scryfall card data cached during import) filtered
 // to only cards the user owns (via JOIN with cards table). Returns same format
@@ -652,11 +661,18 @@ app.get('/api/collection/search', (req, res) => {
       }
     }
 
-    // Type filter
+    // Type filter — searches type_line (handles "creature", "instant", "artifact", etc.)
     const typeFilter = req.query.type as string;
     if (typeFilter) {
       conditions.push("LOWER(json_extract(cc.data, '$.type_line')) LIKE ?");
       params.push(`%${typeFilter.toLowerCase()}%`);
+    }
+
+    // Subtype filter — also searches type_line (same as type, since Scryfall treats both as t:)
+    const subtypeFilter = req.query.subtype as string;
+    if (subtypeFilter) {
+      conditions.push("LOWER(json_extract(cc.data, '$.type_line')) LIKE ?");
+      params.push(`%${subtypeFilter.toLowerCase()}%`);
     }
 
     // Rarity filter
@@ -666,35 +682,50 @@ app.get('/api/collection/search', (req, res) => {
       params.push(rarityFilter.toLowerCase());
     }
 
-    // CMC filter
+    // CMC filter — handles "7+", "5", etc.
     const cmcFilter = req.query.cmc as string;
     if (cmcFilter) {
-      conditions.push('json_extract(cc.data, \'$.cmc\') = ?');
-      params.push(parseFloat(cmcFilter));
+      if (cmcFilter.endsWith('+')) {
+        conditions.push('CAST(json_extract(cc.data, \'$.cmc\') AS REAL) >= ?');
+        params.push(parseFloat(cmcFilter));
+      } else {
+        conditions.push('CAST(json_extract(cc.data, \'$.cmc\') AS REAL) = ?');
+        params.push(parseFloat(cmcFilter));
+      }
     }
-    // Note: format filtering is not supported in local search (dynamic key in legalities).
-    // Use Scryfall proxy search for format filtering.
 
-    // Color filter
+    // Color filter — frontend sends concatenated letters like "WU" for white+blue
     const colorsFilter = req.query.colors as string;
     if (colorsFilter) {
-      const colorLetters = colorsFilter.split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
+      const colorLetters = colorsFilter.toUpperCase().split('').filter(c => /^[WUBRGC]$/.test(c));
       for (const cl of colorLetters) {
         conditions.push("json_extract(cc.data, '$.colors') LIKE ?");
         params.push(`%"${cl}"%`);
       }
     }
 
-    // Power / toughness
+    // Format legality filter — searches the legalities JSON text
+    // legalities is {"commander":"legal","standard":"not_legal",...}
+    // We search the raw text for `"formatname":"legal"`
+    const formatFilter = req.query.format as string;
+    if (formatFilter) {
+      const fmt = formatFilter.toLowerCase();
+      conditions.push("cc.data LIKE ?");
+      params.push(`%"${fmt}":"legal"%`);
+    }
+
+    // Power / toughness — support comparison operators (>=, <=, >, <) and exact match
     const powerFilter = req.query.power as string;
     if (powerFilter) {
-      conditions.push("json_extract(cc.data, '$.power') = ?");
-      params.push(powerFilter);
+      const { op, val } = parseComparison(powerFilter);
+      conditions.push(`CAST(json_extract(cc.data, '$.power') AS REAL) ${op} ?`);
+      params.push(val);
     }
     const toughnessFilter = req.query.toughness as string;
     if (toughnessFilter) {
-      conditions.push("json_extract(cc.data, '$.toughness') = ?");
-      params.push(toughnessFilter);
+      const { op, val } = parseComparison(toughnessFilter);
+      conditions.push(`CAST(json_extract(cc.data, '$.toughness') AS REAL) ${op} ?`);
+      params.push(val);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';

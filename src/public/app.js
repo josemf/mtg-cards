@@ -328,7 +328,7 @@ async function performSearch(page) {
 
     // Route to local collection search or Scryfall proxy
     const collectionOnly = collectionOnlyToggle && collectionOnlyToggle.checked;
-    const endpoint = collectionOnly ? '/api/collection/search' : `/api/cards?${params}`;
+    const endpoint = collectionOnly ? `/api/collection/search?${params}` : `/api/cards?${params}`;
 
     const response = await fetch(endpoint);
 
